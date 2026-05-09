@@ -46,3 +46,6 @@ SEARCH_PER_IP_PER_HOUR = "15"
 
 # OPENROUTER_API_KEY should be set as a secret:
 # pnpm wrangler secret put OPENROUTER_API_KEY
+
+# Enable OpenAI Moderation API for slugs and comments
+# pnpm wrangler secret put OPENAI_API_KEY
