@@ -21,6 +21,58 @@ export interface ModerationEnv {
   OPENROUTER_API_KEY: string;
   OPENROUTER_MODEL: string;
   OPENROUTER_MODERATION_MODEL?: string;
+  OPENAI_API_KEY?: string;
+}
+
+/**
+ * Call the OpenAI Moderation API and return true if the text was flagged.
+ * If this fails, the async sweep can still catch stragglers.
+ */
+export async function openaiModerate(
+  text: string,
+  apiKey: string
+): Promise<boolean> {
+  try {
+    const res = await fetch("https://api.openai.com/v1/moderations", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({ model: "omni-moderation-latest", input: text }),
+    });
+    if (!res.ok) return false;
+    const json: any = await res.json();
+    return json?.results?.[0]?.flagged === true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Immediately mark slug as banned in DB and delete it from KV.
+ * Used when the pre-check flags a slug before generation starts.
+ */
+export async function banSlugNow(
+  slug: string,
+  env: ModerationEnv
+): Promise<void> {
+  const now = Date.now();
+  try {
+    await env.ARTICLES.delete(slug);
+  } catch {}
+  try {
+    await env.DB
+      .prepare(
+        `INSERT INTO article_moderation (slug, status, reason, enqueued_at, checked_at)
+         VALUES (?, 'banned', ?, ?, ?)
+         ON CONFLICT(slug) DO UPDATE SET status='banned', reason=excluded.reason, checked_at=excluded.checked_at`
+      )
+      .bind(slug, "openai-moderation-precheck", now, now)
+      .run();
+  } catch (e) {
+    console.error("banSlugNow: DB write failed", slug, e);
+  }
 }
 
 const BATCH_SIZE = 30;
