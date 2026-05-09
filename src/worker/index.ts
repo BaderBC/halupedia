@@ -14,9 +14,11 @@ import { isLikelyVpn } from "./vpn";
 import { isPermanentlyBlockedSlug } from "./blocklist";
 import { loadHints, saveHints } from "./hints";
 import {
+  banSlugNow,
   countRecentBansByIp,
   enqueueArticleForModeration,
   isSlugBanned,
+  openaiModerate,
   runSweep,
 } from "./moderation";
 
@@ -40,6 +42,9 @@ export interface Env {
   SEARCH_PER_IP_PER_HOUR?: string;
   // Single Durable Object tracking live readers per slug. See presence.ts.
   PRESENCE: DurableObjectNamespace;
+  // Optional: OpenAI API key for synchronous pre-generation moderation.
+  // Set via: pnpm wrangler secret put OPENAI_API_KEY
+  OPENAI_API_KEY?: string;
 }
 
 interface StoredArticle {
@@ -553,6 +558,23 @@ app.get("/api/page/:slug", async (c) => {
   }
 
   const title = slugToTitle(slug);
+
+  // Check title against OpenAI Moderation API before spending LLM tokens
+  if (c.env.OPENAI_API_KEY) {
+    const flagged = await openaiModerate(title, c.env.OPENAI_API_KEY);
+    if (flagged) {
+      c.executionCtx.waitUntil(
+        banSlugNow(slug, c.env).catch((e) =>
+          console.error("banSlugNow failed", e)
+        )
+      );
+      return c.json(
+        { error: "this entry has been removed by moderation", banned: true },
+        404,
+        { "x-robots-tag": "noindex" }
+      );
+    }
+  }
 
   // Pull every prior link-context blurb other articles have written about
   // this slug. These become CANON the LLM must respect.

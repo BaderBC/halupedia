@@ -7,7 +7,7 @@ import {
 } from "./identity";
 import { slugify } from "./slug";
 import { rateLimit, clientIp } from "./ratelimit";
-import { moderateCommentNow } from "./moderation";
+import { moderateCommentNow, openaiModerate } from "./moderation";
 
 export interface CommentsEnv {
   DB: D1Database;
@@ -16,6 +16,7 @@ export interface CommentsEnv {
   OPENROUTER_MODEL: string;
   OPENROUTER_MODERATION_MODEL?: string;
   IDENT_PER_IP_PER_HOUR?: string;
+  OPENAI_API_KEY?: string;
 }
 
 const COOKIE_NAME = "hu_uid";
@@ -419,6 +420,14 @@ export function createCommentsApp() {
     if (!body) return c.json({ error: "comment is empty" }, 400);
     if (body.length > MAX_BODY_LEN) {
       return c.json({ error: `comment exceeds ${MAX_BODY_LEN} chars` }, 400);
+    }
+
+    // Pre-save moderation
+    if (c.env.OPENAI_API_KEY) {
+      const flagged = await openaiModerate(body, c.env.OPENAI_API_KEY);
+      if (flagged) {
+        return c.json({ error: "comment was flagged by moderation" }, 400);
+      }
     }
 
     if (parent_id) {
