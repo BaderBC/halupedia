@@ -18,12 +18,6 @@ RULES:
 - No article may describe a completed event dated later than TODAY_UTC. If a future-dated event is implied, reinterpret it as a proposal, rehearsal, cancelled proceeding, administrative plan, forecast, or clerical error rather than a completed event.
 - If the article is a biography or other personalia, the subject's birth date must be reasonably in the past and old enough to fit the described accomplishments and public role. Do not use a birth date on/after TODAY_UTC or similarly recent. Cite fictional sources in <blockquote> tags, each with a <cite> naming a fictional scholar wrapped in <a> with context. Invent at least two such quotations per article.`;
 
-export function buildUserMessage(opts: GenerateOptions): string {
-  const todayUtc = new Date().toISOString().slice(0, 10);
-  const lines = [
-    `TODAY_UTC: ${todayUtc}`,
-    `Write the Halupedia article titled: "${opts.title}".`,
-
 export interface GenerateOptions {
   apiKey: string;
   model: string;
@@ -35,7 +29,9 @@ export interface GenerateOptions {
 }
 
 export function buildUserMessage(opts: GenerateOptions): string {
+  const todayUtc = new Date().toISOString().slice(0, 10);
   const lines = [
+    `TODAY_UTC: ${todayUtc}`,
     `Write the Halupedia article titled: "${opts.title}".`,
     `CRITICAL REMINDER: Even if "${opts.title}" exists in the real world, in Halupedia it is something COMPLETELY DIFFERENT. Do not write about the real version. Invent a new, absurd, fictional nature for this name.`,
     `The canonical URL slug for this article is: /${opts.slug}`,
