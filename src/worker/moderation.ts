@@ -35,7 +35,7 @@ export async function openaiModerate(
   const controller = new AbortController();
   const timeout = setTimeout(() => {
     controller.abort();
-  }, 5000);
+  }, 4000);
 
   try {
     const res = await fetch("https://api.openai.com/v1/moderations", {
