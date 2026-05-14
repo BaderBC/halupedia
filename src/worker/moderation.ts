@@ -32,9 +32,15 @@ export async function openaiModerate(
   text: string,
   apiKey: string
 ): Promise<boolean> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => {
+    controller.abort();
+  }, 5000);
+
   try {
     const res = await fetch("https://api.openai.com/v1/moderations", {
       method: "POST",
+      signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
@@ -46,6 +52,8 @@ export async function openaiModerate(
     return json?.results?.[0]?.flagged === true;
   } catch {
     return false;
+  } finally {
+    clearTimeout(timeout);
   }
 }
 

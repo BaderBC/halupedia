@@ -422,14 +422,6 @@ export function createCommentsApp() {
       return c.json({ error: `comment exceeds ${MAX_BODY_LEN} chars` }, 400);
     }
 
-    // Pre-save moderation
-    if (c.env.OPENAI_API_KEY) {
-      const flagged = await openaiModerate(body, c.env.OPENAI_API_KEY);
-      if (flagged) {
-        return c.json({ error: "comment was flagged by moderation" }, 400);
-      }
-    }
-
     if (parent_id) {
       const parent = await c.env.DB
         .prepare("SELECT id, slug FROM comments WHERE id = ?")
@@ -450,6 +442,14 @@ export function createCommentsApp() {
         });
       }
       throw e;
+    }
+
+    // Pre-save moderation
+    if (c.env.OPENAI_API_KEY) {
+      const flagged = await openaiModerate(body, c.env.OPENAI_API_KEY);
+      if (flagged) {
+        return c.json({ error: "comment was flagged by moderation" }, 400);
+      }
     }
 
     const id = crypto.randomUUID();
