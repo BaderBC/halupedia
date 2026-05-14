@@ -615,8 +615,8 @@ export function createCommentsApp() {
 
     let user: UserRow;
     try {
-      await enforceCommentCreationRateLimits(c, c.env);
       user = await ensureUser(c, c.env);
+      await enforceCommentCreationRateLimits(c, c.env);
     } catch (e: any) {
       if (e?.status === 429) {
         return c.json({ error: e.message }, 429, {
