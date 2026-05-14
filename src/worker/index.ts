@@ -128,6 +128,32 @@ async function backfillTotal(env: Env): Promise<number> {
   return count;
 }
 
+async function filterModeratedIndexItems(
+  db: D1Database,
+  items: { slug: string; title: string; generatedAt: number | null }[]
+): Promise<{ slug: string; title: string; generatedAt: number | null }[]> {
+  if (items.length === 0) return items;
+
+  const slugs = items.map((it) => it.slug);
+  const placeholders = slugs.map(() => "?").join(",");
+  try {
+    const { results } = await db
+      .prepare(
+        `SELECT slug FROM article_moderation
+         WHERE status IN ('banned', 'pending', 'checking')
+           AND slug IN (${placeholders})`
+      )
+      .bind(...slugs)
+      .all<{ slug: string }>();
+    if (!results || results.length === 0) return items;
+    const blocked = new Set(results.map((r) => r.slug));
+    return items.filter((it) => !blocked.has(it.slug));
+  } catch (e) {
+    console.error("index: moderation filter failed", e);
+    return items;
+  }
+}
+
 app.get("/api/index", async (c) => {
   const cursorRaw = c.req.query("cursor");
   const cursor = cursorRaw && cursorRaw.length > 0 ? cursorRaw : undefined;
@@ -148,6 +174,7 @@ app.get("/api/index", async (c) => {
       title: k.metadata?.title ?? slugToTitle(k.name),
       generatedAt: k.metadata?.generatedAt ?? null,
     }));
+  const filteredItems = await filterModeratedIndexItems(c.env.DB, items);
 
   // Total is only computed on the first page request — subsequent paginated
   // calls don't need it, and it costs an extra KV read (or full sweep).
@@ -160,14 +187,14 @@ app.get("/api/index", async (c) => {
       total = await backfillTotal(c.env);
     }
     // If this first page is the entire dataset, opportunistically reconcile.
-    if (list.list_complete && total !== items.length) {
-      total = items.length;
+    if (list.list_complete && total !== filteredItems.length) {
+      total = filteredItems.length;
       try { await c.env.ARTICLES.put(TOTAL_KEY, String(total)); } catch {}
     }
   }
 
   return c.json({
-    items,
+    items: filteredItems,
     cursor: list.list_complete ? null : (list as any).cursor ?? null,
     complete: list.list_complete,
     total,
