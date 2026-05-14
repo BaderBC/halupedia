@@ -44,11 +44,6 @@ export function App() {
   const [error, setError] = useState<string | null>(null);
   const [dreamMsg, setDreamMsg] = useState<string>(DREAMING_MESSAGES[0]);
   const [headerSearchDraft, setHeaderSearchDraft] = useState<string>("");
-  // Title of the currently-rendered article (extracted from the streamed
-  // <h1>). Declared up here because the slug-change fetch effect needs to
-  // reset it synchronously to avoid leaking a stale title into the next
-  // article's presence broadcast.
-  const [articleTitle, setArticleTitle] = useState<string>("");
   const prevSlugRef = useRef<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
@@ -56,11 +51,6 @@ export function App() {
   useEffect(() => {
     const onPop = () => {
       const s = currentSlug();
-      // Clear the title in the same render as the slug change so the
-      // presence effect below never sees the {new slug, old title} pair
-      // mid-transition. (Backend is now resilient to that, but there's
-      // no reason to ship known-wrong data.)
-      setArticleTitle("");
       setSlug(s);
       setSearchQuery(s === RESERVED_SEARCH ? currentSearchQuery() : "");
     };
@@ -88,11 +78,6 @@ export function App() {
     setHtml("");
     setError(null);
     setStatus("loading");
-    // Clear the previous article's title in the same tick the slug changes
-    // so usePresence doesn't broadcast {s:newSlug, ti:oldTitle} during the
-    // window before the new article's <h1> streams in. That stale pairing
-    // was poisoning the server-side title cache for the new slug.
-    setArticleTitle("");
     setDreamMsg(DREAMING_MESSAGES[Math.floor(Math.random() * DREAMING_MESSAGES.length)]);
 
     const from = prevSlugRef.current;
@@ -155,13 +140,9 @@ export function App() {
   }, [slug]);
 
   /* ----- Extract h1 title from the article HTML ----- */
-  // Used both for `document.title` and for the presence broadcast (so the
-  // "currently being read" panel shows real titles instead of slugified
-  // fallbacks). State declared above with the rest because the slug-change
-  // fetch effect resets it.
+  // Update page title when the first `<h1>` appears in the streamed HTML.
   useEffect(() => {
     if (!html) {
-      setArticleTitle("");
       return;
     }
     const m = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i);
@@ -169,7 +150,6 @@ export function App() {
       const title = m[1].replace(/<[^>]+>/g, "").trim();
       if (title) {
         document.title = `${title} — Halupedia`;
-        setArticleTitle(title);
       }
     }
   }, [html]);
@@ -185,7 +165,7 @@ export function App() {
     slug === HOMEPAGE_SLUG
       ? null
       : slug;
-  const presence = usePresence(presenceSlug, articleTitle);
+  const presence = usePresence(presenceSlug);
 
   /* ----- Top folios (all-time, by upvotes) ----- */
   // Plain D1-backed list, no real-time bells. Refetched on first SPA load
@@ -231,10 +211,6 @@ export function App() {
       const url = clean === "halupedia" ? "/" : `/${clean}`;
       window.history.pushState({}, "", url);
       window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior });
-      // Batch the title clear with the slug change. React renders both
-      // state updates together, so the presence effect sees the new slug
-      // with an empty title rather than the previous article's title.
-      setArticleTitle("");
       setSlug(clean);
       setSearchQuery("");
     },

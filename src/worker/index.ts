@@ -776,7 +776,7 @@ app.get("/api/moderate", async (c) => {
 /*  GET /api/presence  — single global Durable Object, WS-only                  */
 /*                                                                              */
 /*  Clients open exactly one WebSocket for the lifetime of the SPA and send     */
-/*  a `{t:"r", s, ti}` message whenever they navigate to a new slug. The DO     */
+/*  a `{t:"r", s}` message whenever they navigate to a new slug. The DO     */
 /*  fans back two stream types: a global top-N broadcast and a per-client       */
 /*  count for the slug they're on. Closing the WS removes them from counts.    */
 /* -------------------------------------------------------------------------- */
