@@ -17,6 +17,8 @@ import {
   countRecentBansByIp,
   enqueueArticleForModeration,
   isSlugBanned,
+  isTitleModerationApproved,
+  topicRejectedMessage,
   runSweep,
 } from "./moderation";
 
@@ -134,7 +136,10 @@ async function filterModeratedIndexItems(
 ): Promise<{ slug: string; title: string; generatedAt: number | null }[]> {
   if (items.length === 0) return items;
 
-  const slugs = items.map((it) => it.slug);
+  const safeItems = items.filter((it) => !isPermanentlyBlockedSlug(it.slug));
+  if (safeItems.length === 0) return [];
+
+  const slugs = safeItems.map((it) => it.slug);
   const placeholders = slugs.map(() => "?").join(",");
   try {
     const { results } = await db
@@ -147,10 +152,10 @@ async function filterModeratedIndexItems(
       .all<{ slug: string }>();
     if (!results || results.length === 0) return items;
     const blocked = new Set(results.map((r) => r.slug));
-    return items.filter((it) => !blocked.has(it.slug));
+    return safeItems.filter((it) => !blocked.has(it.slug));
   } catch (e) {
     console.error("index: moderation filter failed", e);
-    return items;
+    throw e;
   }
 }
 
@@ -174,7 +179,21 @@ app.get("/api/index", async (c) => {
       title: k.metadata?.title ?? slugToTitle(k.name),
       generatedAt: k.metadata?.generatedAt ?? null,
     }));
-  const filteredItems = await filterModeratedIndexItems(c.env.DB, items);
+  let filteredItems = items;
+  try {
+    filteredItems = await filterModeratedIndexItems(c.env.DB, items);
+  } catch {
+    return c.json(
+      {
+        error: "index temporarily unavailable",
+        items: [],
+        cursor: list.list_complete ? null : ((list as any).cursor ?? null),
+        complete: false,
+        total: null,
+      },
+      503
+    );
+  }
 
   // Total is only computed on the first page request — subsequent paginated
   // calls don't need it, and it costs an extra KV read (or full sweep).
@@ -511,23 +530,8 @@ app.get("/api/page/:slug", async (c) => {
     );
   }
 
-  // 3. Per-IP rate limit on generation (defense against UA-spoofing scrapers).
+  // 3. Resolve caller identity before applying abuse controls.
   const ip = clientIp(c);
-  const perHour = parseInt(c.env.GEN_PER_IP_PER_HOUR || "30", 10);
-  const rl = await rateLimit({
-    kv: c.env.ARTICLES,
-    bucket: "gen",
-    ip,
-    limit: perHour,
-    windowSec: 3600,
-  });
-  if (!rl.ok) {
-    return c.json(
-      { error: `slow down — at most ${rl.limit} new entries per hour from one address` },
-      429,
-      { "retry-after": String(rl.retryAfter), "x-robots-tag": "noindex" }
-    );
-  }
 
   // 3b. IP-strike block. If this IP has had too many articles banned
   //     recently, refuse before any LLM call. This is what stops a botnet
@@ -553,6 +557,39 @@ app.get("/api/page/:slug", async (c) => {
     );
   }
 
+  if (!c.env.OPENROUTER_API_KEY) {
+    return c.json({ error: "OPENROUTER_API_KEY is not configured" }, 500);
+  }
+
+  const title = slugToTitle(slug);
+
+  // 4. Pre-generation content policy check via moderation model.
+  const approvedByPolicy = await isTitleModerationApproved(title, c.env);
+  if (!approvedByPolicy) {
+    return c.json(
+      { error: topicRejectedMessage(), banned: true },
+      403,
+      { "x-robots-tag": "noindex" }
+    );
+  }
+
+  // 5. Per-IP rate limit on generation (defense against UA-spoofing scrapers).
+  const perHour = parseInt(c.env.GEN_PER_IP_PER_HOUR || "30", 10);
+  const rl = await rateLimit({
+    kv: c.env.ARTICLES,
+    bucket: "gen",
+    ip,
+    limit: perHour,
+    windowSec: 3600,
+  });
+  if (!rl.ok) {
+    return c.json(
+      { error: `slow down — at most ${rl.limit} new entries per hour from one address` },
+      429,
+      { "retry-after": String(rl.retryAfter), "x-robots-tag": "noindex" }
+    );
+  }
+
   // 4. Daily soft cap (per-namespace counter).
   const today = new Date().toISOString().slice(0, 10);
   const counterKey = `__counter:${today}`;
@@ -561,10 +598,6 @@ app.get("/api/page/:slug", async (c) => {
   const cap = parseInt(c.env.MAX_ARTICLES_PER_DAY || "5000", 10);
   if (count >= cap) {
     return c.json({ error: "daily generation cap reached; try again tomorrow" }, 503);
-  }
-
-  if (!c.env.OPENROUTER_API_KEY) {
-    return c.json({ error: "OPENROUTER_API_KEY is not configured" }, 500);
   }
 
   // 3. Fetch source context if `from` is present.
@@ -578,8 +611,6 @@ app.get("/api/page/:slug", async (c) => {
       };
     }
   }
-
-  const title = slugToTitle(slug);
 
   // Pull every prior link-context blurb other articles have written about
   // this slug. These become CANON the LLM must respect.

@@ -6,6 +6,7 @@ import {
   type Identity,
 } from "./identity";
 import { slugify } from "./slug";
+import ipaddr from "ipaddr.js";
 import { rateLimit, clientIp } from "./ratelimit";
 import { moderateCommentNow } from "./moderation";
 
@@ -241,17 +242,31 @@ function parsePositiveInt(raw: string | undefined, fallback: number): number {
 
 function ipToSubnet(ip: string): string {
   if (!ip || ip === "unknown") return "unknown";
-  if (ip.includes(".")) {
-    const parts = ip.split(".");
-    if (parts.length === 4 && parts.every((p) => /^\d+$/.test(p))) {
-      return `${parts[0]}.${parts[1]}.${parts[2]}.0/24`;
+  try {
+    const parsed = ipaddr.parse(ip);
+    if (parsed.kind() === "ipv4") {
+      const bytes = parsed.toByteArray();
+      return `${bytes[0]}.${bytes[1]}.${bytes[2]}.0/24`;
     }
-  }
-  if (ip.includes(":")) {
-    const parts = ip.split(":").filter((p) => p.length > 0);
-    if (parts.length >= 4) {
-      return `${parts.slice(0, 4).join(":")}::/64`;
+
+    if (parsed.kind() === "ipv6") {
+      if (parsed.isIPv4MappedAddress && parsed.isIPv4MappedAddress()) {
+        const ipv4 = parsed.toIPv4Address();
+        const bytes = ipv4.toByteArray();
+        return `${bytes[0]}.${bytes[1]}.${bytes[2]}.0/24`;
+      }
+
+      const bytes = parsed.toByteArray();
+      const parts = [
+        (bytes[0] << 8) | bytes[1],
+        (bytes[2] << 8) | bytes[3],
+        (bytes[4] << 8) | bytes[5],
+        (bytes[6] << 8) | bytes[7],
+      ].map((n) => n.toString(16));
+      return `${parts[0]}:${parts[1]}:${parts[2]}:${parts[3]}::/64`;
     }
+  } catch {
+    return ip;
   }
   return ip;
 }
@@ -739,6 +754,7 @@ export function createCommentsApp() {
     let user: UserRow;
     try {
       user = await ensureUser(c, c.env);
+      await enforceArticleVoteRateLimits(c, c.env, user.id);
     } catch (e: any) {
       if (e?.status === 429) {
         return c.json({ error: e.message }, 429, {
