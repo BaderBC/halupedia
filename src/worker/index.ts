@@ -150,7 +150,7 @@ async function filterModeratedIndexItems(
       )
       .bind(...slugs)
       .all<{ slug: string }>();
-    if (!results || results.length === 0) return items;
+    if (!results || results.length === 0) return safeItems;
     const blocked = new Set(results.map((r) => r.slug));
     return safeItems.filter((it) => !blocked.has(it.slug));
   } catch (e) {
