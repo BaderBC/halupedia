@@ -16,6 +16,10 @@ export interface CommentsEnv {
   OPENROUTER_MODEL: string;
   OPENROUTER_MODERATION_MODEL?: string;
   IDENT_PER_IP_PER_HOUR?: string;
+  ARTICLE_VOTE_PER_USER_PER_HOUR?: string;
+  ARTICLE_VOTE_PER_IP_PER_HOUR?: string;
+  ARTICLE_VOTE_PER_SUBNET_PER_HOUR?: string;
+  ARTICLE_VOTE_PER_USER_PER_MINUTE?: string;
 }
 
 const COOKIE_NAME = "hu_uid";
@@ -24,6 +28,12 @@ const COOKIE_NAME = "hu_uid";
 // actually expire.
 const COOKIE_MAX_AGE = 60 * 60 * 24 * 400;
 const MAX_BODY_LEN = 2000;
+const ARTICLE_VOTE_DEFAULTS = {
+  userPerHour: 120,
+  ipPerHour: 240,
+  subnetPerHour: 600,
+  userPerMinute: 30,
+};
 
 export interface UserRow {
   id: string;
@@ -216,11 +226,108 @@ function rootOrderClause(sort: SortMode): string {
       return "ORDER BY score DESC, created_at DESC";
     case "recommended":
     default:
-      return (
+  return (
         "ORDER BY (sqrt(CAST(score AS REAL)) / " +
         "pow(((? - created_at) / 3600000.0) + 2.0, 0.8)) DESC, " +
         "created_at DESC"
       );
+  }
+}
+
+function parsePositiveInt(raw: string | undefined, fallback: number): number {
+  const n = Number.parseInt(raw || "", 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function ipToSubnet(ip: string): string {
+  if (!ip || ip === "unknown") return "unknown";
+  if (ip.includes(".")) {
+    const parts = ip.split(".");
+    if (parts.length === 4 && parts.every((p) => /^\d+$/.test(p))) {
+      return `${parts[0]}.${parts[1]}.${parts[2]}.0/24`;
+    }
+  }
+  if (ip.includes(":")) {
+    const parts = ip.split(":").filter((p) => p.length > 0);
+    if (parts.length >= 4) {
+      return `${parts.slice(0, 4).join(":")}::/64`;
+    }
+  }
+  return ip;
+}
+
+async function enforceArticleVoteRateLimits(
+  c: any,
+  env: CommentsEnv,
+  userId: string
+): Promise<void> {
+  const ip = clientIp(c);
+  const subnet = ipToSubnet(ip);
+
+  const checks = [
+    {
+      scope: "user/hour",
+      result: rateLimit({
+        kv: env.ARTICLES,
+        bucket: "article-vote",
+        ip: `user:${userId}`,
+        limit: parsePositiveInt(
+          env.ARTICLE_VOTE_PER_USER_PER_HOUR,
+          ARTICLE_VOTE_DEFAULTS.userPerHour
+        ),
+        windowSec: 3600,
+      }),
+    },
+    {
+      scope: "ip/hour",
+      result: rateLimit({
+        kv: env.ARTICLES,
+        bucket: "article-vote",
+        ip: `ip:${ip}`,
+        limit: parsePositiveInt(
+          env.ARTICLE_VOTE_PER_IP_PER_HOUR,
+          ARTICLE_VOTE_DEFAULTS.ipPerHour
+        ),
+        windowSec: 3600,
+      }),
+    },
+    {
+      scope: "subnet/hour",
+      result: rateLimit({
+        kv: env.ARTICLES,
+        bucket: "article-vote",
+        ip: `subnet:${subnet}`,
+        limit: parsePositiveInt(
+          env.ARTICLE_VOTE_PER_SUBNET_PER_HOUR,
+          ARTICLE_VOTE_DEFAULTS.subnetPerHour
+        ),
+        windowSec: 3600,
+      }),
+    },
+    {
+      scope: "user/minute",
+      result: rateLimit({
+        kv: env.ARTICLES,
+        bucket: "article-vote",
+        ip: `user:${userId}:burst`,
+        limit: parsePositiveInt(
+          env.ARTICLE_VOTE_PER_USER_PER_MINUTE,
+          ARTICLE_VOTE_DEFAULTS.userPerMinute
+        ),
+        windowSec: 60,
+      }),
+    },
+  ];
+
+  for (const check of checks) {
+    const result = await check.result;
+    if (result.ok) continue;
+    const err: any = new Error(
+      `vote limit exceeded (${check.scope}), max ${result.limit} per window`
+    );
+    err.status = 429;
+    err.retryAfter = result.retryAfter;
+    throw err;
   }
 }
 
@@ -434,6 +541,7 @@ export function createCommentsApp() {
     let user: UserRow;
     try {
       user = await ensureUser(c, c.env);
+      await enforceArticleVoteRateLimits(c, c.env, user.id);
     } catch (e: any) {
       if (e?.status === 429) {
         return c.json({ error: e.message }, 429, {
@@ -498,6 +606,7 @@ export function createCommentsApp() {
     let user: UserRow;
     try {
       user = await ensureUser(c, c.env);
+      await enforceArticleVoteRateLimits(c, c.env, user.id);
     } catch (e: any) {
       if (e?.status === 429) {
         return c.json({ error: e.message }, 429, {
