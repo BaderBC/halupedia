@@ -563,16 +563,6 @@ app.get("/api/page/:slug", async (c) => {
 
   const title = slugToTitle(slug);
 
-  // 4. Pre-generation content policy check via moderation model.
-  const approvedByPolicy = await isTitleModerationApproved(title, c.env);
-  if (!approvedByPolicy) {
-    return c.json(
-      { error: topicRejectedMessage(), banned: true },
-      403,
-      { "x-robots-tag": "noindex" }
-    );
-  }
-
   // 5. Per-IP rate limit on generation (defense against UA-spoofing scrapers).
   const perHour = parseInt(c.env.GEN_PER_IP_PER_HOUR || "30", 10);
   const rl = await rateLimit({
@@ -590,7 +580,17 @@ app.get("/api/page/:slug", async (c) => {
     );
   }
 
-  // 4. Daily soft cap (per-namespace counter).
+  // 6. Pre-generation content policy check via moderation model.
+  const approvedByPolicy = await isTitleModerationApproved(title, c.env);
+  if (!approvedByPolicy) {
+    return c.json(
+      { error: topicRejectedMessage(), banned: true },
+      403,
+      { "x-robots-tag": "noindex" }
+    );
+  }
+
+  // 7. Daily soft cap (per-namespace counter).
   const today = new Date().toISOString().slice(0, 10);
   const counterKey = `__counter:${today}`;
   const countStr = await c.env.ARTICLES.get(counterKey);

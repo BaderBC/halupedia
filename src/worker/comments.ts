@@ -21,6 +21,8 @@ export interface CommentsEnv {
   ARTICLE_VOTE_PER_IP_PER_HOUR?: string;
   ARTICLE_VOTE_PER_SUBNET_PER_HOUR?: string;
   ARTICLE_VOTE_PER_USER_PER_MINUTE?: string;
+  COMMENT_PER_IP_PER_HOUR?: string;
+  COMMENT_PER_IP_PER_MINUTE?: string;
 }
 
 const COOKIE_NAME = "hu_uid";
@@ -34,6 +36,11 @@ const ARTICLE_VOTE_DEFAULTS = {
   ipPerHour: 240,
   subnetPerHour: 600,
   userPerMinute: 30,
+};
+
+const COMMENT_CREATION_DEFAULTS = {
+  ipPerHour: 90,
+  ipPerMinute: 15,
 };
 
 export interface UserRow {
@@ -282,63 +289,116 @@ async function enforceArticleVoteRateLimits(
   const checks = [
     {
       scope: "user/hour",
-      result: rateLimit({
-        kv: env.ARTICLES,
-        bucket: "article-vote",
-        ip: `user:${userId}`,
-        limit: parsePositiveInt(
-          env.ARTICLE_VOTE_PER_USER_PER_HOUR,
-          ARTICLE_VOTE_DEFAULTS.userPerHour
-        ),
-        windowSec: 3600,
-      }),
+      run: () =>
+        rateLimit({
+          kv: env.ARTICLES,
+          bucket: "article-vote",
+          ip: `user:${userId}`,
+          limit: parsePositiveInt(
+            env.ARTICLE_VOTE_PER_USER_PER_HOUR,
+            ARTICLE_VOTE_DEFAULTS.userPerHour
+          ),
+          windowSec: 3600,
+        }),
     },
     {
       scope: "ip/hour",
-      result: rateLimit({
-        kv: env.ARTICLES,
-        bucket: "article-vote",
-        ip: `ip:${ip}`,
-        limit: parsePositiveInt(
-          env.ARTICLE_VOTE_PER_IP_PER_HOUR,
-          ARTICLE_VOTE_DEFAULTS.ipPerHour
-        ),
-        windowSec: 3600,
-      }),
+      run: () =>
+        rateLimit({
+          kv: env.ARTICLES,
+          bucket: "article-vote",
+          ip: `ip:${ip}`,
+          limit: parsePositiveInt(
+            env.ARTICLE_VOTE_PER_IP_PER_HOUR,
+            ARTICLE_VOTE_DEFAULTS.ipPerHour
+          ),
+          windowSec: 3600,
+        }),
     },
     {
       scope: "subnet/hour",
-      result: rateLimit({
-        kv: env.ARTICLES,
-        bucket: "article-vote",
-        ip: `subnet:${subnet}`,
-        limit: parsePositiveInt(
-          env.ARTICLE_VOTE_PER_SUBNET_PER_HOUR,
-          ARTICLE_VOTE_DEFAULTS.subnetPerHour
-        ),
-        windowSec: 3600,
-      }),
+      run: () =>
+        rateLimit({
+          kv: env.ARTICLES,
+          bucket: "article-vote",
+          ip: `subnet:${subnet}`,
+          limit: parsePositiveInt(
+            env.ARTICLE_VOTE_PER_SUBNET_PER_HOUR,
+            ARTICLE_VOTE_DEFAULTS.subnetPerHour
+          ),
+          windowSec: 3600,
+        }),
     },
     {
       scope: "user/minute",
-      result: rateLimit({
-        kv: env.ARTICLES,
-        bucket: "article-vote",
-        ip: `user:${userId}:burst`,
-        limit: parsePositiveInt(
-          env.ARTICLE_VOTE_PER_USER_PER_MINUTE,
-          ARTICLE_VOTE_DEFAULTS.userPerMinute
-        ),
-        windowSec: 60,
-      }),
+      run: () =>
+        rateLimit({
+          kv: env.ARTICLES,
+          bucket: "article-vote",
+          ip: `user:${userId}:burst`,
+          limit: parsePositiveInt(
+            env.ARTICLE_VOTE_PER_USER_PER_MINUTE,
+            ARTICLE_VOTE_DEFAULTS.userPerMinute
+          ),
+          windowSec: 60,
+        }),
     },
   ];
 
-  for (const check of checks) {
-    const result = await check.result;
+  for (const { scope, run } of checks) {
+    const result = await run();
     if (result.ok) continue;
     const err: any = new Error(
-      `vote limit exceeded (${check.scope}), max ${result.limit} per window`
+      `vote limit exceeded (${scope}), max ${result.limit} per window`
+    );
+    err.status = 429;
+    err.retryAfter = result.retryAfter;
+    throw err;
+  }
+}
+
+async function enforceCommentCreationRateLimits(
+  c: any,
+  env: CommentsEnv
+): Promise<void> {
+  const ip = clientIp(c);
+
+  const checks = [
+    {
+      scope: "ip/hour",
+      run: () =>
+        rateLimit({
+          kv: env.ARTICLES,
+          bucket: "comment-create",
+          ip: `ip:${ip}`,
+          limit: parsePositiveInt(
+            env.COMMENT_PER_IP_PER_HOUR,
+            COMMENT_CREATION_DEFAULTS.ipPerHour
+          ),
+          windowSec: 3600,
+        }),
+    },
+    {
+      scope: "ip/minute",
+      run: () =>
+        rateLimit({
+          kv: env.ARTICLES,
+          bucket: "comment-create",
+          ip: `ip:${ip}:burst`,
+          limit: parsePositiveInt(
+            env.COMMENT_PER_IP_PER_MINUTE,
+            COMMENT_CREATION_DEFAULTS.ipPerMinute
+          ),
+          windowSec: 60,
+        }),
+    },
+  ];
+
+  for (const { scope, run } of checks) {
+    const result = await run();
+    if (result.ok) continue;
+    const err: any = new Error(
+      `comment limit exceeded (${scope}), max ${result.limit} per window`
     );
     err.status = 429;
     err.retryAfter = result.retryAfter;
@@ -555,8 +615,8 @@ export function createCommentsApp() {
 
     let user: UserRow;
     try {
+      await enforceCommentCreationRateLimits(c, c.env);
       user = await ensureUser(c, c.env);
-      await enforceArticleVoteRateLimits(c, c.env, user.id);
     } catch (e: any) {
       if (e?.status === 429) {
         return c.json({ error: e.message }, 429, {
