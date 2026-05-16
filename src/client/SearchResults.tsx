@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { solveTurnstile } from "./turnstile";
 
 interface SearchItem {
   slug: string;
@@ -13,6 +14,11 @@ interface SearchResponse {
   hallucinated_count: number;
   rate_limited: boolean;
   retry_after: number | null;
+  // Set by the server when the LLM-suggestion path was skipped because
+  // the visitor looks risky and hasn't yet passed a Turnstile challenge.
+  // The SPA offers an inline "Verify to unlock AI suggestions" button.
+  needs_challenge?: boolean;
+  site_key?: string;
 }
 
 interface Props {
@@ -26,6 +32,7 @@ export function SearchResults({ q, onNavigate, onSearch }: Props) {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [draft, setDraft] = useState(q);
+  const [verifying, setVerifying] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
   // Keep the input mirrored to the route's query (e.g. when user hits Back).
@@ -85,6 +92,61 @@ export function SearchResults({ q, onNavigate, onSearch }: Props) {
     },
     [draft, onSearch]
   );
+
+  // Re-fetch the current query without changing the URL. Used after a
+  // successful Turnstile verification so AI suggestions appear inline.
+  const refetch = useCallback(async () => {
+    if (!q) return;
+    abortRef.current?.abort();
+    const ctrl = new AbortController();
+    abortRef.current = ctrl;
+    setLoading(true);
+    setError(null);
+    try {
+      const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`, {
+        signal: ctrl.signal,
+        credentials: "same-origin",
+      });
+      if (!res.ok) {
+        const j: any = await res.json().catch(() => ({}));
+        throw new Error(j?.error || `error ${res.status}`);
+      }
+      const j: SearchResponse = await res.json();
+      if (ctrl.signal.aborted) return;
+      setData(j);
+    } catch (e: any) {
+      if (!ctrl.signal.aborted && e?.name !== "AbortError") {
+        setError(e?.message || "search failed");
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [q]);
+
+  const onVerify = useCallback(async () => {
+    if (verifying) return;
+    setVerifying(true);
+    try {
+      const token = await solveTurnstile(data?.site_key);
+      // Mint the trust cookie via the dedicated verify endpoint. The
+      // server runs requireHuman (which writes the Set-Cookie) and
+      // returns 200; subsequent search calls then bypass the challenge
+      // and run the LLM-suggestion path.
+      const ok = await fetch("/api/turnstile/verify", {
+        method: "POST",
+        headers: { "x-turnstile-token": token },
+        credentials: "same-origin",
+      });
+      if (!ok.ok) {
+        throw new Error("verification rejected by server");
+      }
+      await refetch();
+    } catch (e: any) {
+      setError(e?.message || "verification failed");
+    } finally {
+      setVerifying(false);
+    }
+  }, [data?.site_key, refetch, verifying]);
 
   const onLinkClick = useCallback(
     (e: React.MouseEvent<HTMLAnchorElement>, slug: string) => {
@@ -152,11 +214,28 @@ export function SearchResults({ q, onNavigate, onSearch }: Props) {
 
       {q && data && !loading && (
         <>
-          {data.rate_limited && (
+          {data.rate_limited && !data.needs_challenge && (
             <div className="search-ratelimit">
               You've hit the search-suggestion rate limit. Showing only entries
               already in the encyclopedia — no new hallucinations this round.
               Try again later.
+            </div>
+          )}
+
+          {data.needs_challenge && (
+            <div className="search-ratelimit">
+              <p style={{ margin: "0 0 0.5rem 0" }}>
+                AI suggestions are paused for this session pending a quick
+                human check.
+              </p>
+              <button
+                type="button"
+                className="search-submit"
+                onClick={onVerify}
+                disabled={verifying}
+              >
+                {verifying ? "Verifying…" : "Verify to unlock AI suggestions"}
+              </button>
             </div>
           )}
 

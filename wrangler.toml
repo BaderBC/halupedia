@@ -44,6 +44,31 @@ GEN_PER_IP_PER_HOUR = "100"
 IDENT_PER_IP_PER_HOUR = "10"
 SEARCH_PER_IP_PER_HOUR = "15"
 
+# --- Cloudflare Turnstile bot gating ---------------------------------------
+# Activates ONLY when all three secrets below are set. With them missing,
+# every gated request falls through (no captcha, no challenge), which is
+# what local dev wants.
+#
+# Setup:
+#   1. Create a Turnstile site at https://dash.cloudflare.com → Turnstile.
+#      Use Widget mode "Managed". Add halupedia.com to the hostname list.
+#   2. Replace the placeholder TURNSTILE_SITE_KEY below with the public key.
+#   3. Set the matching secret + a fresh 32-byte HMAC secret:
+#        pnpm wrangler secret put TURNSTILE_SECRET_KEY
+#        openssl rand -hex 32 | pnpm wrangler secret put TURNSTILE_TRUST_SECRET
+#   4. For local dev, mirror those into .dev.vars.
+#
+# Tunables (both optional, sane defaults baked into the worker):
+#   TURNSTILE_TRUST_TTL_SEC   how long a single successful challenge buys
+#                             the visitor passage on every gated endpoint
+#                             (default 1800 = 30 min)
+#   TURNSTILE_RISKY_RATIO     fraction of the per-IP hourly rate-limit
+#                             after which the gate demands a challenge
+#                             (default 0.5 = 50 %)
+TURNSTILE_SITE_KEY = "0x4AAAAAADQkoxTIvDC4I2RB"
+# TURNSTILE_TRUST_TTL_SEC = "1800"
+# TURNSTILE_RISKY_RATIO = "0.5"
+
 # OPENROUTER_API_KEY should be set as a secret:
 # pnpm wrangler secret put OPENROUTER_API_KEY
 

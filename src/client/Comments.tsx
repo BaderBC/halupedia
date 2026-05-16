@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { gatedFetch } from "./turnstile";
 
 /* -------------------------------------------------------------------------- */
 /*  Types — kept in sync with src/worker/comments.ts                           */
@@ -230,7 +231,7 @@ export function Comments({ slug }: Props) {
     if (!body || submitting) return;
     setSubmitting(true);
     try {
-      const res = await fetch(`/api/comments/${encodeURIComponent(slug)}`, {
+      const res = await gatedFetch(`/api/comments/${encodeURIComponent(slug)}`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         credentials: "same-origin",
@@ -262,7 +263,7 @@ export function Comments({ slug }: Props) {
       if (!body || submitting) return;
       setSubmitting(true);
       try {
-        const res = await fetch(`/api/comments/${encodeURIComponent(slug)}`, {
+        const res = await gatedFetch(`/api/comments/${encodeURIComponent(slug)}`, {
           method: "POST",
           headers: { "content-type": "application/json" },
           credentials: "same-origin",

@@ -8,6 +8,7 @@ import {
 import { slugify } from "./slug";
 import { rateLimit, clientIp } from "./ratelimit";
 import { moderateCommentNow, openaiModerate } from "./moderation";
+import { requireHuman, challengeResponse } from "./turnstile";
 
 export interface CommentsEnv {
   DB: D1Database;
@@ -17,6 +18,13 @@ export interface CommentsEnv {
   OPENROUTER_MODERATION_MODEL?: string;
   IDENT_PER_IP_PER_HOUR?: string;
   OPENAI_API_KEY?: string;
+  // Forwarded so turnstile.requireHuman can read its config. Optional;
+  // missing values fall open (no gating).
+  TURNSTILE_SITE_KEY?: string;
+  TURNSTILE_SECRET_KEY?: string;
+  TURNSTILE_TRUST_SECRET?: string;
+  TURNSTILE_TRUST_TTL_SEC?: string;
+  TURNSTILE_RISKY_RATIO?: string;
 }
 
 const COOKIE_NAME = "hu_uid";
@@ -430,6 +438,21 @@ export function createCommentsApp() {
       if (!parent || parent.slug !== slug) {
         return c.json({ error: "parent not found" }, 400);
       }
+    }
+
+    // Turnstile bot gate. Posting a comment is the textbook "please don't
+    // let bots in" surface — it both creates a user (LLM-generated
+    // identity) and triggers a moderation call. The check sits BEFORE
+    // ensureUser so we don't burn an identity-generation call on a
+    // would-be-spammer.
+    const human = await requireHuman(c, {
+      action: "comment",
+      rateLimitBucket: "ident",
+      rateLimitPerHour: parseInt(c.env.IDENT_PER_IP_PER_HOUR || "10", 10),
+      checkStrikes: true,
+    });
+    if (!human.pass) {
+      return challengeResponse(c, "comment");
     }
 
     let user: UserRow;

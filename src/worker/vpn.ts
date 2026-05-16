@@ -25,8 +25,13 @@ import { BAD_ASNS } from "./bad-asns";
 /** Return true if the request looks like it originates from a VPN /
  *  datacenter ASN we want to refuse LLM-spending operations for. */
 export function isLikelyVpn(c: { req: { raw: Request } }): boolean {
-  const cf = (c.req.raw as unknown as { cf?: { asn?: number; asOrganization?: string } }).cf;
+  const cf = (c.req.raw as unknown as { cf?: { asn?: number; asOrganization?: string; country?: string } }).cf;
   if (!cf) return false;
+  // Tor exits. Cloudflare assigns the pseudo-country code "T1" to any
+  // request coming through the Tor network, regardless of which ASN the
+  // exit happens to be on. This is more reliable than maintaining our
+  // own exit-node list, since anyone can spin up a new Tor exit.
+  if (cf.country === "T1") return true;
   if (typeof cf.asn === "number" && BAD_ASNS.has(cf.asn)) return true;
   // Secondary heuristic: organization name keywords. Catches the rare ASN
   // that isn't on the list. Conservative — only matches strings that
