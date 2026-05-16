@@ -100,6 +100,47 @@ export class PresenceDO implements DurableObject {
   }
 
   async fetch(req: Request): Promise<Response> {
+    // Admin sideband: POST /__admin/ban {slug}. Called from src/worker/admin.ts
+    // via a DO RPC stub when an operator bans a slug. We strip it from our
+    // in-memory title cache, clear it out of every live socket's attachment
+    // (so a still-connected reader no longer "counts" as being on that slug),
+    // and immediately re-broadcast the top-N so other readers' sidebars
+    // refresh instead of waiting for the next 3-second tick.
+    const url = new URL(req.url);
+    if (req.method === "POST" && url.pathname === "/__admin/ban") {
+      let body: { slug?: unknown };
+      try {
+        body = (await req.json()) as { slug?: unknown };
+      } catch {
+        return new Response("invalid JSON", { status: 400 });
+      }
+      const slug =
+        typeof body.slug === "string" && body.slug.length > 0
+          ? body.slug.slice(0, MAX_SLUG_LEN).trim()
+          : null;
+      if (!slug) {
+        return new Response("missing slug", { status: 400 });
+      }
+
+      this.titles.delete(slug);
+      for (const ws of this.liveSockets()) {
+        const att = ws.deserializeAttachment() as Attachment | null;
+        if (att?.s === slug) {
+          // Demote the socket to "idle" so it stops contributing to the
+          // banned slug's count. ls is reset so the next broadcast sends
+          // a fresh `here` if the client lands on another slug.
+          ws.serializeAttachment({
+            s: null,
+            msgs: att.msgs,
+            ls: undefined,
+          } as Attachment);
+        }
+      }
+      await this.broadcastAll();
+
+      return new Response(null, { status: 204 });
+    }
+
     if (req.headers.get("upgrade")?.toLowerCase() !== "websocket") {
       return new Response("expected websocket upgrade", { status: 426 });
     }

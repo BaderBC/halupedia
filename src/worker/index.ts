@@ -21,6 +21,13 @@ import {
   topicRejectedMessage,
   runSweep,
 } from "./moderation";
+import { createAdminApp } from "./admin";
+import {
+  requireHuman,
+  challengeResponse,
+  turnstileSiteKey,
+  turnstileConfigured,
+} from "./turnstile";
 
 export interface Env {
   ARTICLES: KVNamespace;
@@ -42,6 +49,17 @@ export interface Env {
   SEARCH_PER_IP_PER_HOUR?: string;
   // Single Durable Object tracking live readers per slug. See presence.ts.
   PRESENCE: DurableObjectNamespace;
+  // Admin accounts live in D1 (`admins` table). No env-based password.
+  //
+  // Turnstile bot gating. Public site key + secret key from Cloudflare,
+  // plus a 32-byte random HMAC secret for signing the trust cookie. All
+  // three must be present for gating to be active; missing any of them
+  // falls open (lets all requests through).
+  TURNSTILE_SITE_KEY?: string;
+  TURNSTILE_SECRET_KEY?: string;
+  TURNSTILE_TRUST_SECRET?: string;
+  TURNSTILE_TRUST_TTL_SEC?: string;
+  TURNSTILE_RISKY_RATIO?: string;
 }
 
 interface StoredArticle {
@@ -57,6 +75,10 @@ const app = new Hono<{ Bindings: Env }>();
 // Comments / users / votes (D1-backed). Mounted at root so route paths like
 // `/api/comments/:slug` and `/api/me` are stable.
 app.route("/", createCommentsApp());
+
+// Admin panel API (basic-auth gated). Mounted at root so the routes inside
+// keep their canonical /api/admin/* paths.
+app.route("/", createAdminApp());
 
 /* -------------------------------------------------------------------------- */
 /*  Bot detection                                                              */
@@ -98,7 +120,7 @@ app.get("/robots.txt", (c) => {
 // Reserved slugs are non-article paths the SPA owns. The worker refuses to
 // generate them and the article handler short-circuits with 404 so accidental
 // or malicious hits to /api/page/all-entries don't burn tokens or pollute KV.
-const RESERVED_SLUGS = new Set(["all-entries", "search"]);
+const RESERVED_SLUGS = new Set(["all-entries", "search", "admin"]);
 
 /* -------------------------------------------------------------------------- */
 /*  GET /api/index  — paginated list of every cached article                  */
@@ -326,6 +348,11 @@ app.get("/api/search", async (c) => {
   let cacheHit = false;
   let rateLimited = false;
   let retryAfter: number | null = null;
+  // Set when the LLM call was skipped specifically because the visitor
+  // looks risky and hasn't passed a Turnstile challenge. Surfaced in the
+  // response so the SPA can render an inline "verify to unlock AI
+  // suggestions" affordance without bothering the user during typing.
+  let needsChallenge = false;
   const usedSlugs = new Set(existing.map((e) => e.slug));
 
   if (cachedHalluc && Array.isArray(cachedHalluc) && cachedHalluc.length > 0) {
@@ -369,6 +396,21 @@ app.get("/api/search", async (c) => {
     } else {
     const ip = clientIp(c);
     const perHour = parseInt(c.env.SEARCH_PER_IP_PER_HOUR || "15", 10);
+    // Turnstile gate. Search runs on every keystroke (debounced) so we
+    // never 428 here — instead, treat a needed challenge the same way we
+    // treat a rate-limit cap: skip the LLM call, return DB-only results,
+    // and surface `needs_challenge:true` so the SPA can offer to verify.
+    const human = await requireHuman(c, {
+      action: "search",
+      rateLimitBucket: "search",
+      rateLimitPerHour: perHour,
+      checkStrikes: true,
+    });
+    if (!human.pass) {
+      rateLimited = true;
+      retryAfter = null;
+      needsChallenge = true;
+    } else {
     const rl = await rateLimit({
       kv: c.env.ARTICLES,
       bucket: "search",
@@ -430,6 +472,7 @@ app.get("/api/search", async (c) => {
       }
     }
     }
+    }
   }
 
   return c.json({
@@ -440,6 +483,8 @@ app.get("/api/search", async (c) => {
     rate_limited: rateLimited,
     retry_after: retryAfter,
     cached: cacheHit,
+    needs_challenge: needsChallenge,
+    site_key: needsChallenge ? turnstileSiteKey(c.env) : undefined,
   });
 });
 
@@ -530,8 +575,38 @@ app.get("/api/page/:slug", async (c) => {
     );
   }
 
-  // 3. Resolve caller identity before applying abuse controls.
+  // 2c. Turnstile bot gate. Sits BEFORE the rate-limit increment so a
+  //     would-be visitor who gets challenged doesn't have their hourly
+  //     budget burned by the rejected attempt. Falls open if Turnstile
+  //     isn't configured.
+  const perHour = parseInt(c.env.GEN_PER_IP_PER_HOUR || "30", 10);
+  const human = await requireHuman(c, {
+    action: "generate",
+    rateLimitBucket: "gen",
+    rateLimitPerHour: perHour,
+    // generate already does its own strike check at step 3b below.
+    checkStrikes: false,
+  });
+  if (!human.pass) {
+    return challengeResponse(c, "generate");
+  }
+
+  // 3. Per-IP rate limit on generation (defense against UA-spoofing scrapers).
   const ip = clientIp(c);
+  const rl = await rateLimit({
+    kv: c.env.ARTICLES,
+    bucket: "gen",
+    ip,
+    limit: perHour,
+    windowSec: 3600,
+  });
+  if (!rl.ok) {
+    return c.json(
+      { error: `slow down — at most ${rl.limit} new entries per hour from one address` },
+      429,
+      { "retry-after": String(rl.retryAfter), "x-robots-tag": "noindex" }
+    );
+  }
 
   // 3b. IP-strike block. If this IP has had too many articles banned
   //     recently, refuse before any LLM call. This is what stops a botnet
@@ -562,23 +637,6 @@ app.get("/api/page/:slug", async (c) => {
   }
 
   const title = slugToTitle(slug);
-
-  // 5. Per-IP rate limit on generation (defense against UA-spoofing scrapers).
-  const perHour = parseInt(c.env.GEN_PER_IP_PER_HOUR || "30", 10);
-  const rl = await rateLimit({
-    kv: c.env.ARTICLES,
-    bucket: "gen",
-    ip,
-    limit: perHour,
-    windowSec: 3600,
-  });
-  if (!rl.ok) {
-    return c.json(
-      { error: `slow down — at most ${rl.limit} new entries per hour from one address` },
-      429,
-      { "retry-after": String(rl.retryAfter), "x-robots-tag": "noindex" }
-    );
-  }
 
   // 6. Pre-generation content policy check via moderation model.
   const approvedByPolicy = await isTitleModerationApproved(title, c.env);
@@ -778,6 +836,51 @@ async function collectAndStore(
 /* -------------------------------------------------------------------------- */
 /*  GET /api/random  — pick a random cached slug                               */
 /* -------------------------------------------------------------------------- */
+
+/* -------------------------------------------------------------------------- */
+/*  GET /api/config  — public runtime config for the SPA                       */
+/*                                                                             */
+/*  Today this only carries the Turnstile site key (so the SPA can mount the  */
+/*  widget without a separate round trip every time it's needed). The site    */
+/*  key is public by design — it appears in the page source anyway once the  */
+/*  widget renders.                                                            */
+/* -------------------------------------------------------------------------- */
+
+app.get("/api/config", (c) => {
+  return c.json({
+    turnstile: {
+      site_key: turnstileSiteKey(c.env),
+      enabled: turnstileConfigured(c.env),
+    },
+  });
+});
+
+/* -------------------------------------------------------------------------- */
+/*  POST /api/turnstile/verify  — explicit cookie-minting endpoint             */
+/*                                                                             */
+/*  Used by the search page (and any other surface) that wants to verify a    */
+/*  Turnstile token WITHOUT performing a real protected action. The handler   */
+/*  body is empty; all the work happens inside requireHuman, which verifies   */
+/*  the X-Turnstile-Token header against Cloudflare's siteverify and (on     */
+/*  success) writes the 30-minute trust cookie via Set-Cookie. Subsequent    */
+/*  gated calls on this origin then bypass the challenge for the cookie's    */
+/*  lifetime.                                                                 */
+/* -------------------------------------------------------------------------- */
+
+app.post("/api/turnstile/verify", async (c) => {
+  // Use the same risk-weighting as the comment surface so a token earned
+  // here is "strong enough" to satisfy any gated endpoint afterwards.
+  const human = await requireHuman(c, {
+    action: "comment",
+    rateLimitBucket: "ident",
+    rateLimitPerHour: parseInt(c.env.IDENT_PER_IP_PER_HOUR || "10", 10),
+    checkStrikes: true,
+  });
+  if (!human.pass) {
+    return challengeResponse(c, "comment");
+  }
+  return c.json({ ok: true });
+});
 
 app.get("/api/random", async (c) => {
   const list = await c.env.ARTICLES.list({ limit: 1000 });

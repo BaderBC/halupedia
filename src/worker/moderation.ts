@@ -73,6 +73,31 @@ interface JudgeItem {
   text: string;
 }
 
+export function topicRejectedMessage(): string {
+  return "this topic was rejected by moderation";
+}
+
+/**
+ * Synchronous pre-generation title check used by `/api/page/:slug`.
+ *
+ * The broader moderation pipeline is async and fail-open, but this gate is
+ * intentionally in the hot path for fresh article generation so obvious abuse
+ * does not spend article-generation tokens or enter KV. If the moderation
+ * model itself fails, we still fail open and let the existing sweep catch
+ * anything borderline later.
+ */
+export async function isTitleModerationApproved(
+  title: string,
+  env: ModerationEnv
+): Promise<boolean> {
+  const rejected = await judgeBatch(
+    [{ index: 1, text: title }],
+    "article title",
+    env
+  );
+  return !rejected.has(1);
+}
+
 /* -------------------------------------------------------------------------- */
 /*  Deterministic comment-spam detector                                        */
 /* -------------------------------------------------------------------------- */
