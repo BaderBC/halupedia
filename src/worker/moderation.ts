@@ -19,6 +19,7 @@ export interface ModerationEnv {
   DB: D1Database;
   ARTICLES: KVNamespace;
   OPENROUTER_API_KEY: string;
+  LLM_API_URL?: string;
   OPENROUTER_MODEL: string;
   OPENROUTER_MODERATION_MODEL?: string;
 }
@@ -184,7 +185,7 @@ async function judgeBatch(
 
   let raw = "";
   try {
-    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    const res = await fetch(chatCompletionsUrl(env.LLM_API_URL), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -231,6 +232,13 @@ async function judgeBatch(
     if (Number.isFinite(n) && valid.has(n)) out.add(n);
   }
   return out;
+}
+
+function chatCompletionsUrl(apiUrl: string | undefined): string {
+  const trimmed = apiUrl?.trim();
+  return trimmed && trimmed.length > 0
+    ? trimmed
+    : "https://openrouter.ai/api/v1/chat/completions";
 }
 
 /* -------------------------------------------------------------------------- */

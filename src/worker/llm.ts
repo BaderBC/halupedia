@@ -17,6 +17,7 @@ RULES:
 
 export interface GenerateOptions {
   apiKey: string;
+  apiUrl?: string;
   model: string;
   title: string;
   slug: string;
@@ -74,7 +75,7 @@ export async function streamGeneration(opts: GenerateOptions): Promise<ReadableS
     ],
   };
 
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+  const res = await fetch(chatCompletionsUrl(opts.apiUrl), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -87,7 +88,7 @@ export async function streamGeneration(opts: GenerateOptions): Promise<ReadableS
 
   if (!res.ok || !res.body) {
     const errText = await res.text().catch(() => "");
-    throw new Error(`OpenRouter error ${res.status}: ${errText.slice(0, 300)}`);
+    throw new Error(`LLM provider error ${res.status}: ${errText.slice(0, 300)}`);
   }
 
   const decoder = new TextDecoder();
@@ -154,6 +155,7 @@ Reply with ONLY a JSON array of N strings. No prose, no code fences, no explanat
  *  fewer if the model misbehaves. Never throws. */
 export async function hallucinateSearchTitles(
   apiKey: string,
+  apiUrl: string | undefined,
   model: string,
   query: string,
   count: number
@@ -161,7 +163,7 @@ export async function hallucinateSearchTitles(
   const userMsg = `Search query: "${query}"\n\nReturn a JSON array of exactly ${count} plausible Halupedia titles inspired by this query. No commentary.`;
   let raw = "";
   try {
-    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    const res = await fetch(chatCompletionsUrl(apiUrl), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -205,7 +207,7 @@ export async function hallucinateSearchTitles(
  * Non-streaming fallback (used for retry on malformed output).
  */
 export async function generateOnce(opts: GenerateOptions): Promise<string> {
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+  const res = await fetch(chatCompletionsUrl(opts.apiUrl), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -224,7 +226,14 @@ export async function generateOnce(opts: GenerateOptions): Promise<string> {
       ],
     }),
   });
-  if (!res.ok) throw new Error(`OpenRouter error ${res.status}`);
+  if (!res.ok) throw new Error(`LLM provider error ${res.status}`);
   const json: any = await res.json();
   return json?.choices?.[0]?.message?.content ?? "";
+}
+
+function chatCompletionsUrl(apiUrl: string | undefined): string {
+  const trimmed = apiUrl?.trim();
+  return trimmed && trimmed.length > 0
+    ? trimmed
+    : "https://openrouter.ai/api/v1/chat/completions";
 }

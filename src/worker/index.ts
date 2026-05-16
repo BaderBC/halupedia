@@ -34,6 +34,7 @@ export interface Env {
   DB: D1Database;
   ASSETS: Fetcher;
   OPENROUTER_API_KEY: string;
+  LLM_API_URL?: string;
   OPENROUTER_MODEL: string;
   OPENROUTER_MODERATION_MODEL?: string;
   MAX_ARTICLES_PER_DAY: string;
@@ -426,6 +427,7 @@ app.get("/api/search", async (c) => {
       // leaves us with enough.
       const titles = await hallucinateSearchTitles(
         c.env.OPENROUTER_API_KEY,
+        c.env.LLM_API_URL,
         c.env.OPENROUTER_MODERATION_MODEL ||
           c.env.OPENROUTER_MODEL ||
           "google/gemini-2.5-flash-lite",
@@ -681,6 +683,7 @@ app.get("/api/page/:slug", async (c) => {
 
   const genOpts: GenerateOptions = {
     apiKey: c.env.OPENROUTER_API_KEY,
+    apiUrl: c.env.LLM_API_URL,
     model: c.env.OPENROUTER_MODEL || "google/gemini-2.0-flash-001",
     title,
     slug,

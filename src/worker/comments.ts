@@ -15,6 +15,7 @@ export interface CommentsEnv {
   DB: D1Database;
   ARTICLES: KVNamespace;
   OPENROUTER_API_KEY: string;
+  LLM_API_URL?: string;
   OPENROUTER_MODEL: string;
   OPENROUTER_MODERATION_MODEL?: string;
   IDENT_PER_IP_PER_HOUR?: string;
@@ -153,6 +154,7 @@ async function ensureUser(
   try {
     identity = await hallucinateIdentity(
       env.OPENROUTER_API_KEY,
+      env.LLM_API_URL,
       env.OPENROUTER_MODEL || "google/gemini-2.5-flash-lite"
     );
   } catch {
