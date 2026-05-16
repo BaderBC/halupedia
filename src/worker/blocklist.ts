@@ -1,3 +1,5 @@
+import { containsDeterministicDisallowedAbuse } from "./abuse";
+
 /**
  * Permanent slug-pattern blocklist. Slugs matching any rule below are
  * refused before generation, before cache lookup, before anything. They
@@ -12,6 +14,7 @@
  */
 export function isPermanentlyBlockedSlug(slug: string): boolean {
   slug = slug.toLowerCase();
+  if (containsDeterministicDisallowedAbuse(slug)) return true;
   if (slug.startsWith("0-0")) return true;
   if (slug.includes("0-0-0")) return true;
   if (slug.includes("strama")) return true;

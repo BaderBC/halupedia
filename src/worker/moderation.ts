@@ -1,3 +1,5 @@
+import { containsDeterministicDisallowedAbuse } from "./abuse";
+
 /**
  * Content moderation. Two trigger paths:
  *
@@ -91,6 +93,7 @@ export async function isTitleModerationApproved(
   title: string,
   env: ModerationEnv
 ): Promise<boolean> {
+  if (containsDeterministicDisallowedAbuse(title)) return false;
   const rejected = await judgeBatch(
     [{ index: 1, text: title }],
     "article title",
@@ -139,6 +142,7 @@ const ENGAGEMENT_BAIT_PHRASES = [
   "informative article",
 ];
 export function isObviousCommentSpam(body: string): boolean {
+  if (containsDeterministicDisallowedAbuse(body)) return true;
   const trimmed = body.trim();
   if (SPAM_FINGERPRINT.test(trimmed)) return true;
   // Strip emojis/punctuation and check if what remains is ONLY a bait phrase.
@@ -172,11 +176,19 @@ async function judgeBatch(
 ): Promise<Set<number>> {
   if (items.length === 0) return new Set();
 
-  const numbered = items
+  const out = new Set<number>();
+  for (const item of items) {
+    if (containsDeterministicDisallowedAbuse(item.text)) out.add(item.index);
+  }
+
+  const modelItems = items.filter((item) => !out.has(item.index));
+  if (modelItems.length === 0) return out;
+
+  const numbered = modelItems
     .map((it) => `${it.index}. ${it.text.replace(/\s+/g, " ").slice(0, 500)}`)
     .join("\n");
 
-  const userMsg = `Review the following ${items.length} ${kind}${items.length === 1 ? "" : "s"} and return the JSON array of 1-based indices to remove (or [] if all are acceptable):\n\n${numbered}`;
+  const userMsg = `Review the following ${modelItems.length} ${kind}${modelItems.length === 1 ? "" : "s"} and return the JSON array of 1-based indices to remove (or [] if all are acceptable):\n\n${numbered}`;
 
   const model =
     env.OPENROUTER_MODERATION_MODEL ||
@@ -225,8 +237,7 @@ async function judgeBatch(
   }
   if (!Array.isArray(arr)) return new Set();
 
-  const valid = new Set(items.map((it) => it.index));
-  const out = new Set<number>();
+  const valid = new Set(modelItems.map((it) => it.index));
   for (const v of arr) {
     const n = typeof v === "number" ? v : parseInt(String(v), 10);
     if (Number.isFinite(n) && valid.has(n)) out.add(n);
