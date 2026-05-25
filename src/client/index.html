@@ -1,15 +1,9 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <!-- Google tag (gtag.js) -->
-    <script async src="https://www.googletagmanager.com/gtag/js?id=G-GGLD5TG5E9"></script>
-    <script>
-      window.dataLayer = window.dataLayer || [];
-      function gtag(){dataLayer.push(arguments);}
-      gtag('js', new Date());
-
-      gtag('config', 'G-GGLD5TG5E9');
-    </script>
+    <!-- Google Analytics is loaded dynamically by ConsentGate.tsx after the
+         user opts in. Loading it here unconditionally would set tracking
+         cookies before consent and break GDPR / Polish UODO compliance. -->
 
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />

@@ -128,7 +128,13 @@ app.get("/robots.txt", (c) => {
 // Reserved slugs are non-article paths the SPA owns. The worker refuses to
 // generate them and the article handler short-circuits with 404 so accidental
 // or malicious hits to /api/page/all-entries don't burn tokens or pollute KV.
-const RESERVED_SLUGS = new Set(["all-entries", "search", "admin"]);
+const RESERVED_SLUGS = new Set([
+  "all-entries",
+  "search",
+  "admin",
+  "privacy",
+  "terms",
+]);
 
 /* -------------------------------------------------------------------------- */
 /*  GET /api/index  — paginated list of every cached article                  */

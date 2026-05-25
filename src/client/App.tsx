@@ -6,11 +6,15 @@ import { Sidebar } from "./Sidebar";
 import { usePresence } from "./usePresence";
 import { ArticleVote } from "./ArticleVote";
 import { Admin } from "./Admin";
+import { ConsentGate, openConsentModal } from "./ConsentGate";
+import { Privacy, Terms } from "./Legal";
 import { gatedFetch } from "./turnstile";
 
 const RESERVED_ALL_ENTRIES = "all-entries";
 const RESERVED_SEARCH = "search";
 const RESERVED_ADMIN = "admin";
+const RESERVED_PRIVACY = "privacy";
+const RESERVED_TERMS = "terms";
 /** The "/" homepage maps to this internal slug (see seed.ts). It is not
  *  votable and must not pollute the live "currently being consulted" list. */
 const HOMEPAGE_SLUG = "halupedia";
@@ -78,7 +82,9 @@ export function App() {
     if (
       slug === RESERVED_ALL_ENTRIES ||
       slug === RESERVED_SEARCH ||
-      slug === RESERVED_ADMIN
+      slug === RESERVED_ADMIN ||
+      slug === RESERVED_PRIVACY ||
+      slug === RESERVED_TERMS
     ) {
       abortRef.current?.abort();
       setHtml("");
@@ -190,6 +196,8 @@ export function App() {
     slug === RESERVED_ALL_ENTRIES ||
     slug === RESERVED_SEARCH ||
     slug === RESERVED_ADMIN ||
+    slug === RESERVED_PRIVACY ||
+    slug === RESERVED_TERMS ||
     slug === HOMEPAGE_SLUG
       ? null
       : slug;
@@ -399,6 +407,10 @@ export function App() {
             />
           ) : slug === RESERVED_ADMIN ? (
             <Admin />
+          ) : slug === RESERVED_PRIVACY ? (
+            <Privacy />
+          ) : slug === RESERVED_TERMS ? (
+            <Terms />
           ) : (
             <>
               {status === "loading" && !html && (
@@ -475,6 +487,8 @@ export function App() {
         {slug !== RESERVED_ALL_ENTRIES &&
           slug !== RESERVED_SEARCH &&
           slug !== RESERVED_ADMIN &&
+          slug !== RESERVED_PRIVACY &&
+          slug !== RESERVED_TERMS &&
           status === "done" && <Comments slug={slug} />}
       </div>
 
@@ -482,7 +496,40 @@ export function App() {
         <p className="footer-tagline-line">
           Comprehensive coverage of topics mainstream encyclopedias overlooked.
         </p>
+        <p className="footer-legal-line">
+          <a
+            href="/privacy"
+            onClick={(e) => {
+              e.preventDefault();
+              navigateTo("privacy");
+            }}
+          >
+            Privacy
+          </a>
+          <span aria-hidden="true"> · </span>
+          <a
+            href="/terms"
+            onClick={(e) => {
+              e.preventDefault();
+              navigateTo("terms");
+            }}
+          >
+            Terms
+          </a>
+          <span aria-hidden="true"> · </span>
+          <button
+            type="button"
+            className="footer-legal-button"
+            onClick={() => openConsentModal()}
+          >
+            Cookie preferences
+          </button>
+        </p>
       </footer>
+
+      <ConsentGate
+        suppressed={slug === RESERVED_PRIVACY || slug === RESERVED_TERMS}
+      />
     </div>
   );
 }
