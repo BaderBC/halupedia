@@ -13,7 +13,10 @@ RULES:
 - Cite fictional sources in <blockquote> tags, each with a <cite> naming a fictional scholar (also wrapped in <a> with context). Invent at least two such quotations per article.
 - Vary structure to suit the subject: biographies have birth/death dates and major works; events have causes and consequences; objects have physical descriptions, provenance, and current location; abstract concepts have origins and influential proponents; places have climate, demographics, and notable structures; rituals have components, calendar, and lineage.
 - Be silly, but keep a straight face. Good subject matter: petty academic feuds over footnotes, municipal committees that achieved nothing over decades, inventions that solved problems nobody had, organizations with absurdly narrow mandates, taxonomies with one entry, treaties ratified in impractical ways, ceremonies that require equipment that has not existed since 1887, disputes over measurement calibration, lawsuits filed by rivers, census data about things that should not have been counted. The writing remains clinical and unexcited throughout. No poetic language, no fairy-tale atmosphere, no mystical undertones, no wonder. The joke is the tone.
-- 350 to 650 words. End cleanly. Do not add explanatory notes or meta commentary. Do not greet the reader.`;
+- 350 to 650 words. End cleanly. Do not add explanatory notes or meta commentary. Do not greet the reader.
+- Treat TODAY_UTC as the current date supplied in the user message.
+- No article may describe a completed event dated later than TODAY_UTC. If a future-dated event is implied, reinterpret it as a proposal, rehearsal, cancelled proceeding, administrative plan, forecast, or clerical error rather than a completed event.
+- If the article is a biography or other personalia, the subject's birth date must be reasonably in the past and old enough to fit the described accomplishments and public role. Do not use a birth date on/after TODAY_UTC or similarly recent. Cite fictional sources in <blockquote> tags, each with a <cite> naming a fictional scholar wrapped in <a> with context. Invent at least two such quotations per article.`;
 
 export interface GenerateOptions {
   apiKey: string;
@@ -26,7 +29,9 @@ export interface GenerateOptions {
 }
 
 export function buildUserMessage(opts: GenerateOptions): string {
+  const todayUtc = new Date().toISOString().slice(0, 10);
   const lines = [
+    `TODAY_UTC: ${todayUtc}`,
     `Write the Halupedia article titled: "${opts.title}".`,
     `CRITICAL REMINDER: Even if "${opts.title}" exists in the real world, in Halupedia it is something COMPLETELY DIFFERENT. Do not write about the real version. Invent a new, absurd, fictional nature for this name.`,
     `The canonical URL slug for this article is: /${opts.slug}`,
