@@ -17,7 +17,7 @@
  *     need to keep a separate Map in sync with hibernation.
  *
  * Protocol:
- *   client → server   {"t":"r","s":"slug-or-null","ti":"Title"}
+ *   client → server   {"t":"r","s":"slug-or-null"}
  *                     "I'm now reading <slug>". slug=null means "connected
  *                     but not on an article" (search / all-entries).
  *   server → client   {"t":"hi"}
@@ -34,15 +34,14 @@
  * doesn't auto-reschedule. Idle DO has no alarm running.
  */
 
+import { slugToTitle, slugify } from "./slug";
+
 interface PresenceEnv {
-  // No bindings used today. Reserved for future per-IP rate limiting,
-  // logging, etc.
+  ARTICLES: KVNamespace;
 }
 
 const BROADCAST_INTERVAL_MS = 3000;
 const TOP_N = 5;
-const MAX_SLUG_LEN = 200;
-const MAX_TITLE_LEN = 200;
 const MAX_MSG_BYTES = 1000;
 const RATE_BURST = 10; // messages per second per WS before we close
 const TOTAL_WS_CAP = 30000; // hard ceiling per DO
@@ -57,21 +56,9 @@ interface Attachment {
 }
 
 // NOTE on titles:
-//   Titles are NOT stored per-socket. The old design kept `ti` on each
-//   websocket attachment and then picked "the first non-empty title from
-//   any live socket on that slug" when building the top-N. That had two
-//   fatal flaws:
-//     1. During a slug change, the client briefly held the *previous*
-//        article's title in state, so it shipped `{s: newSlug,
-//        ti: oldTitle}` on the navigation frame. That stale pair won the
-//        first-non-empty race and got frozen into `lastTop`.
-//     2. The subsequent corrected message `{s: newSlug, ti: realTitle}`
-//        never triggered a fresh broadcast (only slug *changes* did), so
-//        the wrong title persisted on every other reader's sidebar.
-//   The fix is structural: titles live in a single DO-level map, indexed
-//   by slug, last-non-empty-write-wins. Counts are derived from live
-//   sockets; titles are derived from this map. The two concerns are now
-//   independent, which is what the architecture wanted in the first place.
+//   Titles are derived from server-owned article metadata; if not available,
+//   we fall back to deterministic slug formatting. This prevents sidebar
+//   poisoning from untrusted text.
 
 interface TopItem {
   s: string;
@@ -85,12 +72,10 @@ export class PresenceDO implements DurableObject {
 
   /**
    * Authoritative slug → title map. Single source of truth for what to
-   * render in "Currently Being Consulted". Updated on every `r` message
-   * with a non-empty `ti`, last-write-wins; entries are evicted when the
-   * slug has zero live readers. In-memory only — the DO can hibernate
-   * and lose this map; the very next `r` for an affected slug repopulates
-   * it. We never persist it because doing so would just re-introduce the
-   * "stale title outlives the reader" failure mode we just fixed.
+   * render in "Currently Being Consulted". Updated from canonicalized slugs
+   * on every `r` message; entries are evicted when the slug has zero live
+   * readers. In-memory only — the DO can hibernate and lose this map;
+   * the very next `r` for an affected slug repopulates it.
    */
   private titles: Map<string, string> = new Map();
 
@@ -217,12 +202,10 @@ export class PresenceDO implements DurableObject {
     }
 
     let s: string | null = null;
-    let ti = "";
     if (parsed.s != null) {
-      const sRaw = String(parsed.s).slice(0, MAX_SLUG_LEN).trim();
-      if (sRaw) {
-        s = sRaw;
-        ti = String(parsed.ti ?? "").slice(0, MAX_TITLE_LEN).trim();
+      const canonical = slugify(String(parsed.s));
+      if (canonical) {
+        s = canonical;
       }
     }
 
@@ -236,20 +219,19 @@ export class PresenceDO implements DurableObject {
     };
     ws.serializeAttachment(newAtt);
 
-    // Title bookkeeping. A non-empty title overwrites whatever we had
-    // (last-write-wins). An empty title is *ignored* — never let a client
-    // that hasn't yet streamed the new article's <h1> wipe a perfectly
-    // good title that another reader just supplied.
+    // Title bookkeeping: titles are derived from server-owned article metadata
+    // only, never from client-provided text.
     let titleChanged = false;
-    if (s && ti && this.titles.get(s) !== ti) {
-      this.titles.set(s, ti);
-      titleChanged = true;
+    if (s) {
+      const canonicalTitle = await this.resolveTitle(s);
+      if (this.titles.get(s) !== canonicalTitle) {
+        this.titles.set(s, canonicalTitle);
+        titleChanged = true;
+      }
     }
 
-    // Broadcast on slug change (someone joined/left a slug) OR title
-    // change (a reader corrected a title we were showing). Title-only
-    // updates that don't affect the top-N are essentially free: the
-    // topChanged check inside broadcastAll() will turn them into no-ops.
+    // Broadcast on slug change (someone joined/left a slug). Title changes
+    // here are effectively no-ops unless they alter the top list.
     if (slugChanged || titleChanged) {
       await this.broadcastAll();
     }
@@ -390,13 +372,40 @@ export class PresenceDO implements DurableObject {
   }
 
   /** Build a sorted top-N from a precomputed counts map. Titles come
-   *  from the DO-level `titles` map (last-non-empty-write-wins), NOT
-   *  from socket attachments — that's the whole point of the refactor. */
+   *  from the DO-level `titles` map (canonical slug -> title), NOT from
+   *  socket attachments — that's the whole point of the refactor. */
   private snapshotTop(counts: Map<string, number>): TopItem[] {
     const arr: TopItem[] = [];
-    for (const [s, n] of counts) arr.push({ s, ti: this.titles.get(s) ?? "", n });
+    for (const [s, n] of counts) {
+      const ti = this.titles.get(s) ?? slugToTitle(s);
+      this.titles.set(s, ti);
+      arr.push({ s, ti, n });
+    }
     arr.sort((a, b) => b.n - a.n || a.s.localeCompare(b.s));
     return arr.slice(0, TOP_N);
+  }
+
+  /** Load a trusted title for this slug from KV metadata or fallback. */
+  private async resolveTitle(slug: string): Promise<string> {
+    const cached = this.titles.get(slug);
+    if (cached) return cached;
+
+    try {
+      const fromKv = await this.env.ARTICLES.get(slug, "json") as
+        | { title?: string }
+        | null;
+      const title = fromKv?.title?.trim();
+      if (title) {
+        this.titles.set(slug, title);
+        return title;
+      }
+    } catch {
+      /* ignored; fallback below */
+    }
+
+    const fallback = slugToTitle(slug);
+    this.titles.set(slug, fallback);
+    return fallback;
   }
 
   async alarm(): Promise<void> {

@@ -1,7 +1,7 @@
 /**
  * usePresence — single WebSocket to /api/presence for the lifetime of the SPA.
  *
- * Sends one `{t:"r", s, ti}` message per navigation. The server fans back:
+ * Sends one `{t:"r", s}` message per navigation. The server fans back:
  *   - `top`  — global top-N {slug,title,count}, refreshed every ~3s when changed
  *   - `here` — count of readers on the current slug, when it changes
  *
@@ -36,8 +36,7 @@ const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 30_000;
 
 export function usePresence(
-  slug: string | null,
-  title: string
+  slug: string | null
 ): PresenceState {
   const [top, setTop] = useState<PresenceTopItem[]>([]);
   const [hereCount, setHereCount] = useState<number | null>(null);
@@ -45,12 +44,10 @@ export function usePresence(
 
   const wsRef = useRef<WebSocket | null>(null);
   const slugRef = useRef<string | null>(slug);
-  const titleRef = useRef<string>(title);
   const reconnectAttemptRef = useRef(0);
 
   // Keep refs in sync so the WS open handler always sends the *current* slug.
   slugRef.current = slug;
-  titleRef.current = title;
 
   // Open the WS once for the SPA's lifetime; reconnect on drop.
   useEffect(() => {
@@ -65,7 +62,6 @@ export function usePresence(
           JSON.stringify({
             t: "r",
             s: slugRef.current,
-            ti: titleRef.current,
           })
         );
       } catch {
@@ -152,10 +148,9 @@ export function usePresence(
     };
   }, []);
 
-  // Whenever slug or title changes, push an `r` if the socket is open.
-  // Only reset hereCount when the SLUG actually changes — a title-only
-  // update (e.g. when the new article's <h1> finishes streaming) must not
-  // wipe the count we just received from the server for the same slug.
+  // Push an `r` whenever slug changes if the socket is already open.
+  // Only reset hereCount when the SLUG actually changes — that signals a
+  // different location, so the prior count no longer applies.
   const lastSentSlugRef = useRef<string | null>(slug);
   useEffect(() => {
     if (lastSentSlugRef.current !== slug) {
@@ -165,12 +160,12 @@ export function usePresence(
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
       try {
-        ws.send(JSON.stringify({ t: "r", s: slug, ti: title }));
+        ws.send(JSON.stringify({ t: "r", s: slug }));
       } catch {
         /* ignore */
       }
     }
-  }, [slug, title]);
+  }, [slug]);
 
   return { top, hereCount, connected };
 }
