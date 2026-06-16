@@ -45,12 +45,18 @@ migrations_dir = "migrations"
 
 [vars]
 OPENROUTER_MODEL = "google/gemini-2.5-flash-lite"
+# Optional OpenAI-compatible chat completions endpoint override. Leave unset
+# for OpenRouter; set locally in .dev.vars to use z.ai or another compatible
+# provider without changing code.
+# LLM_API_URL = "https://api.z.ai/api/coding/paas/v4/chat/completions"
 MAX_ARTICLES_PER_DAY = "5000"
 # Per-IP guards against UA-spoofing scrapers. Bypassable via IP rotation,
 # but the global daily cap above is the hard backstop.
 GEN_PER_IP_PER_HOUR = "100"
 IDENT_PER_IP_PER_HOUR = "10"
 SEARCH_PER_IP_PER_HOUR = "15"
+COMMENT_PER_IP_PER_HOUR = "90"
+COMMENT_PER_IP_PER_MINUTE = "15"
 
 # Image generation cap (lazy /img/<uuid> requests per UTC day, globally).
 # Even valid UUIDs return 503 after this many in one day. Backstop.

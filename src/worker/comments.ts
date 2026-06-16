@@ -6,6 +6,7 @@ import {
   type Identity,
 } from "./identity";
 import { slugify } from "./slug";
+import ipaddr from "ipaddr.js";
 import { rateLimit, clientIp } from "./ratelimit";
 import { moderateCommentNow } from "./moderation";
 import { requireHuman, challengeResponse } from "./turnstile";
@@ -14,9 +15,16 @@ export interface CommentsEnv {
   DB: D1Database;
   ARTICLES: KVNamespace;
   OPENROUTER_API_KEY: string;
+  LLM_API_URL?: string;
   OPENROUTER_MODEL: string;
   OPENROUTER_MODERATION_MODEL?: string;
   IDENT_PER_IP_PER_HOUR?: string;
+  ARTICLE_VOTE_PER_USER_PER_HOUR?: string;
+  ARTICLE_VOTE_PER_IP_PER_HOUR?: string;
+  ARTICLE_VOTE_PER_SUBNET_PER_HOUR?: string;
+  ARTICLE_VOTE_PER_USER_PER_MINUTE?: string;
+  COMMENT_PER_IP_PER_HOUR?: string;
+  COMMENT_PER_IP_PER_MINUTE?: string;
   // Forwarded so turnstile.requireHuman can read its config. Optional;
   // missing values fall open (no gating).
   TURNSTILE_SITE_KEY?: string;
@@ -32,6 +40,17 @@ const COOKIE_NAME = "hu_uid";
 // actually expire.
 const COOKIE_MAX_AGE = 60 * 60 * 24 * 400;
 const MAX_BODY_LEN = 2000;
+const ARTICLE_VOTE_DEFAULTS = {
+  userPerHour: 120,
+  ipPerHour: 240,
+  subnetPerHour: 600,
+  userPerMinute: 30,
+};
+
+const COMMENT_CREATION_DEFAULTS = {
+  ipPerHour: 90,
+  ipPerMinute: 15,
+};
 
 export interface UserRow {
   id: string;
@@ -135,6 +154,7 @@ async function ensureUser(
   try {
     identity = await hallucinateIdentity(
       env.OPENROUTER_API_KEY,
+      env.LLM_API_URL,
       env.OPENROUTER_MODEL || "google/gemini-2.5-flash-lite"
     );
   } catch {
@@ -224,11 +244,175 @@ function rootOrderClause(sort: SortMode): string {
       return "ORDER BY score DESC, created_at DESC";
     case "recommended":
     default:
-      return (
+  return (
         "ORDER BY (sqrt(CAST(score AS REAL)) / " +
         "pow(((? - created_at) / 3600000.0) + 2.0, 0.8)) DESC, " +
         "created_at DESC"
       );
+  }
+}
+
+function parsePositiveInt(raw: string | undefined, fallback: number): number {
+  const n = Number.parseInt(raw || "", 10);
+  return Number.isFinite(n) && n > 0 ? n : fallback;
+}
+
+function ipToSubnet(ip: string): string {
+  if (!ip || ip === "unknown") return "unknown";
+  try {
+    const parsed = ipaddr.parse(ip);
+    if (parsed.kind() === "ipv4") {
+      const bytes = parsed.toByteArray();
+      return `${bytes[0]}.${bytes[1]}.${bytes[2]}.0/24`;
+    }
+
+    if (parsed.kind() === "ipv6") {
+      if (parsed.isIPv4MappedAddress && parsed.isIPv4MappedAddress()) {
+        const ipv4 = parsed.toIPv4Address();
+        const bytes = ipv4.toByteArray();
+        return `${bytes[0]}.${bytes[1]}.${bytes[2]}.0/24`;
+      }
+
+      const bytes = parsed.toByteArray();
+      const parts = [
+        (bytes[0] << 8) | bytes[1],
+        (bytes[2] << 8) | bytes[3],
+        (bytes[4] << 8) | bytes[5],
+        (bytes[6] << 8) | bytes[7],
+      ].map((n) => n.toString(16));
+      return `${parts[0]}:${parts[1]}:${parts[2]}:${parts[3]}::/64`;
+    }
+  } catch {
+    return ip;
+  }
+  return ip;
+}
+
+async function enforceArticleVoteRateLimits(
+  c: any,
+  env: CommentsEnv,
+  userId: string
+): Promise<void> {
+  const ip = clientIp(c);
+  const subnet = ipToSubnet(ip);
+
+  const checks = [
+    {
+      scope: "user/hour",
+      run: () =>
+        rateLimit({
+          kv: env.ARTICLES,
+          bucket: "article-vote",
+          ip: `user:${userId}`,
+          limit: parsePositiveInt(
+            env.ARTICLE_VOTE_PER_USER_PER_HOUR,
+            ARTICLE_VOTE_DEFAULTS.userPerHour
+          ),
+          windowSec: 3600,
+        }),
+    },
+    {
+      scope: "ip/hour",
+      run: () =>
+        rateLimit({
+          kv: env.ARTICLES,
+          bucket: "article-vote",
+          ip: `ip:${ip}`,
+          limit: parsePositiveInt(
+            env.ARTICLE_VOTE_PER_IP_PER_HOUR,
+            ARTICLE_VOTE_DEFAULTS.ipPerHour
+          ),
+          windowSec: 3600,
+        }),
+    },
+    {
+      scope: "subnet/hour",
+      run: () =>
+        rateLimit({
+          kv: env.ARTICLES,
+          bucket: "article-vote",
+          ip: `subnet:${subnet}`,
+          limit: parsePositiveInt(
+            env.ARTICLE_VOTE_PER_SUBNET_PER_HOUR,
+            ARTICLE_VOTE_DEFAULTS.subnetPerHour
+          ),
+          windowSec: 3600,
+        }),
+    },
+    {
+      scope: "user/minute",
+      run: () =>
+        rateLimit({
+          kv: env.ARTICLES,
+          bucket: "article-vote",
+          ip: `user:${userId}:burst`,
+          limit: parsePositiveInt(
+            env.ARTICLE_VOTE_PER_USER_PER_MINUTE,
+            ARTICLE_VOTE_DEFAULTS.userPerMinute
+          ),
+          windowSec: 60,
+        }),
+    },
+  ];
+
+  for (const { scope, run } of checks) {
+    const result = await run();
+    if (result.ok) continue;
+    const err: any = new Error(
+      `vote limit exceeded (${scope}), max ${result.limit} per window`
+    );
+    err.status = 429;
+    err.retryAfter = result.retryAfter;
+    throw err;
+  }
+}
+
+async function enforceCommentCreationRateLimits(
+  c: any,
+  env: CommentsEnv
+): Promise<void> {
+  const ip = clientIp(c);
+
+  const checks = [
+    {
+      scope: "ip/hour",
+      run: () =>
+        rateLimit({
+          kv: env.ARTICLES,
+          bucket: "comment-create",
+          ip: `ip:${ip}`,
+          limit: parsePositiveInt(
+            env.COMMENT_PER_IP_PER_HOUR,
+            COMMENT_CREATION_DEFAULTS.ipPerHour
+          ),
+          windowSec: 3600,
+        }),
+    },
+    {
+      scope: "ip/minute",
+      run: () =>
+        rateLimit({
+          kv: env.ARTICLES,
+          bucket: "comment-create",
+          ip: `ip:${ip}:burst`,
+          limit: parsePositiveInt(
+            env.COMMENT_PER_IP_PER_MINUTE,
+            COMMENT_CREATION_DEFAULTS.ipPerMinute
+          ),
+          windowSec: 60,
+        }),
+    },
+  ];
+
+  for (const { scope, run } of checks) {
+    const result = await run();
+    if (result.ok) continue;
+    const err: any = new Error(
+      `comment limit exceeded (${scope}), max ${result.limit} per window`
+    );
+    err.status = 429;
+    err.retryAfter = result.retryAfter;
+    throw err;
   }
 }
 
@@ -457,6 +641,7 @@ export function createCommentsApp() {
     let user: UserRow;
     try {
       user = await ensureUser(c, c.env);
+      await enforceCommentCreationRateLimits(c, c.env);
     } catch (e: any) {
       if (e?.status === 429) {
         return c.json({ error: e.message }, 429, {
@@ -521,6 +706,7 @@ export function createCommentsApp() {
     let user: UserRow;
     try {
       user = await ensureUser(c, c.env);
+      await enforceArticleVoteRateLimits(c, c.env, user.id);
     } catch (e: any) {
       if (e?.status === 429) {
         return c.json({ error: e.message }, 429, {
@@ -653,6 +839,7 @@ export function createCommentsApp() {
     let user: UserRow;
     try {
       user = await ensureUser(c, c.env);
+      await enforceArticleVoteRateLimits(c, c.env, user.id);
     } catch (e: any) {
       if (e?.status === 429) {
         return c.json({ error: e.message }, 429, {

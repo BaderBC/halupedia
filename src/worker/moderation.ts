@@ -1,3 +1,5 @@
+import { containsDeterministicDisallowedAbuse } from "./abuse";
+
 /**
  * Content moderation. Two trigger paths:
  *
@@ -19,6 +21,7 @@ export interface ModerationEnv {
   DB: D1Database;
   ARTICLES: KVNamespace;
   OPENROUTER_API_KEY: string;
+  LLM_API_URL?: string;
   OPENROUTER_MODEL: string;
   OPENROUTER_MODERATION_MODEL?: string;
 }
@@ -73,6 +76,32 @@ interface JudgeItem {
   text: string;
 }
 
+export function topicRejectedMessage(): string {
+  return "this topic was rejected by moderation";
+}
+
+/**
+ * Synchronous pre-generation title check used by `/api/page/:slug`.
+ *
+ * The broader moderation pipeline is async and fail-open, but this gate is
+ * intentionally in the hot path for fresh article generation so obvious abuse
+ * does not spend article-generation tokens or enter KV. If the moderation
+ * model itself fails, we still fail open and let the existing sweep catch
+ * anything borderline later.
+ */
+export async function isTitleModerationApproved(
+  title: string,
+  env: ModerationEnv
+): Promise<boolean> {
+  if (containsDeterministicDisallowedAbuse(title)) return false;
+  const rejected = await judgeBatch(
+    [{ index: 1, text: title }],
+    "article title",
+    env
+  );
+  return !rejected.has(1);
+}
+
 /* -------------------------------------------------------------------------- */
 /*  Deterministic comment-spam detector                                        */
 /* -------------------------------------------------------------------------- */
@@ -113,6 +142,7 @@ const ENGAGEMENT_BAIT_PHRASES = [
   "informative article",
 ];
 export function isObviousCommentSpam(body: string): boolean {
+  if (containsDeterministicDisallowedAbuse(body)) return true;
   const trimmed = body.trim();
   if (SPAM_FINGERPRINT.test(trimmed)) return true;
   // Strip emojis/punctuation and check if what remains is ONLY a bait phrase.
@@ -146,11 +176,19 @@ async function judgeBatch(
 ): Promise<Set<number>> {
   if (items.length === 0) return new Set();
 
-  const numbered = items
+  const out = new Set<number>();
+  for (const item of items) {
+    if (containsDeterministicDisallowedAbuse(item.text)) out.add(item.index);
+  }
+
+  const modelItems = items.filter((item) => !out.has(item.index));
+  if (modelItems.length === 0) return out;
+
+  const numbered = modelItems
     .map((it) => `${it.index}. ${it.text.replace(/\s+/g, " ").slice(0, 500)}`)
     .join("\n");
 
-  const userMsg = `Review the following ${items.length} ${kind}${items.length === 1 ? "" : "s"} and return the JSON array of 1-based indices to remove (or [] if all are acceptable):\n\n${numbered}`;
+  const userMsg = `Review the following ${modelItems.length} ${kind}${modelItems.length === 1 ? "" : "s"} and return the JSON array of 1-based indices to remove (or [] if all are acceptable):\n\n${numbered}`;
 
   const model =
     env.OPENROUTER_MODERATION_MODEL ||
@@ -159,7 +197,7 @@ async function judgeBatch(
 
   let raw = "";
   try {
-    const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    const res = await fetch(chatCompletionsUrl(env.LLM_API_URL), {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -199,13 +237,19 @@ async function judgeBatch(
   }
   if (!Array.isArray(arr)) return new Set();
 
-  const valid = new Set(items.map((it) => it.index));
-  const out = new Set<number>();
+  const valid = new Set(modelItems.map((it) => it.index));
   for (const v of arr) {
     const n = typeof v === "number" ? v : parseInt(String(v), 10);
     if (Number.isFinite(n) && valid.has(n)) out.add(n);
   }
   return out;
+}
+
+function chatCompletionsUrl(apiUrl: string | undefined): string {
+  const trimmed = apiUrl?.trim();
+  return trimmed && trimmed.length > 0
+    ? trimmed
+    : "https://openrouter.ai/api/v1/chat/completions";
 }
 
 /* -------------------------------------------------------------------------- */
