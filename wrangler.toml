@@ -96,3 +96,8 @@ class_name = "PresenceDO"
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["PresenceDO"]
+# Enable OpenAI Moderation API for slugs and comments
+# pnpm wrangler secret put OPENAI_API_KEY
+
+# Enable OpenAI Moderation API for slugs and comments
+# pnpm wrangler secret put OPENAI_API_KEY

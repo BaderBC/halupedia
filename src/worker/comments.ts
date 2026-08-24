@@ -7,7 +7,7 @@ import {
 } from "./identity";
 import { slugify } from "./slug";
 import { rateLimit, clientIp } from "./ratelimit";
-import { moderateCommentNow } from "./moderation";
+import { moderateCommentNow, openaiModerate } from "./moderation";
 import { requireHuman, challengeResponse } from "./turnstile";
 
 export interface CommentsEnv {
@@ -17,6 +17,7 @@ export interface CommentsEnv {
   OPENROUTER_MODEL: string;
   OPENROUTER_MODERATION_MODEL?: string;
   IDENT_PER_IP_PER_HOUR?: string;
+  OPENAI_API_KEY?: string;
   // Forwarded so turnstile.requireHuman can read its config. Optional;
   // missing values fall open (no gating).
   TURNSTILE_SITE_KEY?: string;
@@ -464,6 +465,14 @@ export function createCommentsApp() {
         });
       }
       throw e;
+    }
+
+    // Pre-save moderation
+    if (c.env.OPENAI_API_KEY) {
+      const flagged = await openaiModerate(body, c.env.OPENAI_API_KEY);
+      if (flagged) {
+        return c.json({ error: "comment was flagged by moderation" }, 400);
+      }
     }
 
     const id = crypto.randomUUID();
