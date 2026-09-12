@@ -289,3 +289,8 @@ License, or (at your option) any later version.
 If the press has improved your day, you may
 [buy us tokens](https://buymeacoffee.com/baderbc) or join the conversation on
 [Discord](https://discord.gg/fKMnyNwtGc).
+
+## Idea
+
+- Bartłomiej Strama ([BaderBC](https://github.com/BaderBC))
+- Tomasz Mamala ([Majkipl27](https://github.com/Majkipl27))
