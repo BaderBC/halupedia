@@ -17,6 +17,8 @@ import {
   countRecentBansByIp,
   enqueueArticleForModeration,
   isSlugBanned,
+  isTitleModerationApproved,
+  topicRejectedMessage,
   runSweep,
 } from "./moderation";
 import { createAdminApp } from "./admin";
@@ -36,6 +38,7 @@ export interface Env {
   // src/worker/images.ts). Optional — missing binding disables /img/*.
   IMAGES: R2Bucket;
   OPENROUTER_API_KEY: string;
+  LLM_API_URL?: string;
   OPENROUTER_MODEL: string;
   OPENROUTER_MODERATION_MODEL?: string;
   /** OpenRouter model used for image generation. Must support the
@@ -166,6 +169,35 @@ async function backfillTotal(env: Env): Promise<number> {
   return count;
 }
 
+async function filterModeratedIndexItems(
+  db: D1Database,
+  items: { slug: string; title: string; generatedAt: number | null }[]
+): Promise<{ slug: string; title: string; generatedAt: number | null }[]> {
+  if (items.length === 0) return items;
+
+  const safeItems = items.filter((it) => !isPermanentlyBlockedSlug(it.slug));
+  if (safeItems.length === 0) return [];
+
+  const slugs = safeItems.map((it) => it.slug);
+  const placeholders = slugs.map(() => "?").join(",");
+  try {
+    const { results } = await db
+      .prepare(
+        `SELECT slug FROM article_moderation
+         WHERE status IN ('banned', 'pending', 'checking')
+           AND slug IN (${placeholders})`
+      )
+      .bind(...slugs)
+      .all<{ slug: string }>();
+    if (!results || results.length === 0) return safeItems;
+    const blocked = new Set(results.map((r) => r.slug));
+    return safeItems.filter((it) => !blocked.has(it.slug));
+  } catch (e) {
+    console.error("index: moderation filter failed", e);
+    throw e;
+  }
+}
+
 app.get("/api/index", async (c) => {
   const cursorRaw = c.req.query("cursor");
   const cursor = cursorRaw && cursorRaw.length > 0 ? cursorRaw : undefined;
@@ -186,6 +218,21 @@ app.get("/api/index", async (c) => {
       title: k.metadata?.title ?? slugToTitle(k.name),
       generatedAt: k.metadata?.generatedAt ?? null,
     }));
+  let filteredItems = items;
+  try {
+    filteredItems = await filterModeratedIndexItems(c.env.DB, items);
+  } catch {
+    return c.json(
+      {
+        error: "index temporarily unavailable",
+        items: [],
+        cursor: list.list_complete ? null : ((list as any).cursor ?? null),
+        complete: false,
+        total: null,
+      },
+      503
+    );
+  }
 
   // Total is only computed on the first page request — subsequent paginated
   // calls don't need it, and it costs an extra KV read (or full sweep).
@@ -198,14 +245,14 @@ app.get("/api/index", async (c) => {
       total = await backfillTotal(c.env);
     }
     // If this first page is the entire dataset, opportunistically reconcile.
-    if (list.list_complete && total !== items.length) {
-      total = items.length;
+    if (list.list_complete && total !== filteredItems.length) {
+      total = filteredItems.length;
       try { await c.env.ARTICLES.put(TOTAL_KEY, String(total)); } catch {}
     }
   }
 
   return c.json({
-    items,
+    items: filteredItems,
     cursor: list.list_complete ? null : (list as any).cursor ?? null,
     complete: list.list_complete,
     total,
@@ -396,6 +443,7 @@ app.get("/api/search", async (c) => {
       // leaves us with enough.
       const titles = await hallucinateSearchTitles(
         c.env.OPENROUTER_API_KEY,
+        c.env.LLM_API_URL,
         c.env.OPENROUTER_MODERATION_MODEL ||
           c.env.OPENROUTER_MODEL ||
           "google/gemini-2.5-flash-lite",
@@ -602,7 +650,23 @@ app.get("/api/page/:slug", async (c) => {
     );
   }
 
-  // 4. Daily soft cap (per-namespace counter).
+  if (!c.env.OPENROUTER_API_KEY) {
+    return c.json({ error: "OPENROUTER_API_KEY is not configured" }, 500);
+  }
+
+  const title = slugToTitle(slug);
+
+  // 6. Pre-generation content policy check via moderation model.
+  const approvedByPolicy = await isTitleModerationApproved(title, c.env);
+  if (!approvedByPolicy) {
+    return c.json(
+      { error: topicRejectedMessage(), banned: true },
+      403,
+      { "x-robots-tag": "noindex" }
+    );
+  }
+
+  // 7. Daily soft cap (per-namespace counter).
   const today = new Date().toISOString().slice(0, 10);
   const counterKey = `__counter:${today}`;
   const countStr = await c.env.ARTICLES.get(counterKey);
@@ -610,10 +674,6 @@ app.get("/api/page/:slug", async (c) => {
   const cap = parseInt(c.env.MAX_ARTICLES_PER_DAY || "5000", 10);
   if (count >= cap) {
     return c.json({ error: "daily generation cap reached; try again tomorrow" }, 503);
-  }
-
-  if (!c.env.OPENROUTER_API_KEY) {
-    return c.json({ error: "OPENROUTER_API_KEY is not configured" }, 500);
   }
 
   // 3. Fetch source context if `from` is present.
@@ -628,8 +688,6 @@ app.get("/api/page/:slug", async (c) => {
     }
   }
 
-  const title = slugToTitle(slug);
-
   // Pull every prior link-context blurb other articles have written about
   // this slug. These become CANON the LLM must respect.
   let priorHints: string[] = [];
@@ -641,6 +699,7 @@ app.get("/api/page/:slug", async (c) => {
 
   const genOpts: GenerateOptions = {
     apiKey: c.env.OPENROUTER_API_KEY,
+    apiUrl: c.env.LLM_API_URL,
     model: c.env.OPENROUTER_MODEL || "google/gemini-2.0-flash-001",
     title,
     slug,

@@ -253,6 +253,8 @@ Defined in `wrangler.toml` under `[vars]`:
 | `MAX_ARTICLES_PER_DAY` | `5000` | Global circuit breaker — soft cap per UTC day |
 | `GEN_PER_IP_PER_HOUR` | `100` | Per-IP article generation budget |
 | `IDENT_PER_IP_PER_HOUR` | `10` | Per-IP cap on minting new commenter identities |
+| `COMMENT_PER_IP_PER_HOUR` | `90` | Per-IP comment creation budget |
+| `COMMENT_PER_IP_PER_MINUTE` | `15` | Per-IP comment burst budget |
 
 Secrets (set via `wrangler secret put`):
 

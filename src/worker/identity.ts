@@ -20,6 +20,7 @@ export interface Identity {
 
 export async function hallucinateIdentity(
   apiKey: string,
+  apiUrl: string | undefined,
   model: string
 ): Promise<Identity> {
   const body = {
@@ -33,7 +34,7 @@ export async function hallucinateIdentity(
     ],
   };
 
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+  const res = await fetch(chatCompletionsUrl(apiUrl), {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -48,6 +49,13 @@ export async function hallucinateIdentity(
   const json: any = await res.json();
   const raw: string = json?.choices?.[0]?.message?.content ?? "";
   return parseIdentity(raw);
+}
+
+function chatCompletionsUrl(apiUrl: string | undefined): string {
+  const trimmed = apiUrl?.trim();
+  return trimmed && trimmed.length > 0
+    ? trimmed
+    : "https://openrouter.ai/api/v1/chat/completions";
 }
 
 export function parseIdentity(raw: string): Identity {

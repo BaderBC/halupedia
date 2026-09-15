@@ -14,6 +14,9 @@ importers:
       hono:
         specifier: ^4.6.14
         version: 4.12.14
+      ipaddr.js:
+        specifier: ^2.4.0
+        version: 2.4.0
       react:
         specifier: ^18.3.1
         version: 18.3.1
@@ -940,6 +943,10 @@ packages:
   hono@4.12.14:
     resolution: {integrity: sha512-am5zfg3yu6sqn5yjKBNqhnTX7Cv+m00ox+7jbaKkrLMRJ4rAdldd1xPd/JzbBWspqaQv6RSTrgFN95EsfhC+7w==}
     engines: {node: '>=16.9.0'}
+
+  ipaddr.js@2.4.0:
+    resolution: {integrity: sha512-9VGk3HGanVE6JoZXHiCpnGy5X0jYDnN4EA4lntFPj+1vIWlFhIylq2CrrCOJH9EAhc5CYhq18F2Av2tgoAPsYQ==}
+    engines: {node: '>= 10'}
 
   is-arrayish@0.3.4:
     resolution: {integrity: sha512-m6UrgzFVUYawGBh1dUsWR5M2Clqic9RVXC/9f8ceNlv2IcO9j9J/z8UoCLPqtsPBFNzEpfR3xftohbfqDx8EQA==}
@@ -1950,6 +1957,8 @@ snapshots:
   has-flag@4.0.0: {}
 
   hono@4.12.14: {}
+
+  ipaddr.js@2.4.0: {}
 
   is-arrayish@0.3.4:
     optional: true
